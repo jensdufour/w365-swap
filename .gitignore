@@ -1,0 +1,22 @@
+# Environment files
+.env
+
+# PowerShell module output
+output/
+
+# State files (contain user/device IDs)
+config/environments.json
+config/state.json
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# Editor
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+
+# Test results
+TestResults/
+*.xml
