@@ -1,5 +1,6 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { createOboGraphClient, extractBearerToken } from "../lib/graph-client.js";
+import { isValidGuid, isValidAzureResourceId, isValidAccessTier, isValidBlobName, sanitizeErrorMessage } from "../lib/validation.js";
 
 /**
  * POST /api/environments/export
@@ -35,6 +36,16 @@ async function exportEnvironment(request: HttpRequest, context: InvocationContex
     return { status: 400, jsonBody: { error: "cloudPcId, projectName, and storageAccountId are required" } };
   }
 
+  if (!isValidGuid(cloudPcId)) {
+    return { status: 400, jsonBody: { error: "Invalid cloudPcId format" } };
+  }
+  if (!isValidAzureResourceId(storageAccountId)) {
+    return { status: 400, jsonBody: { error: "Invalid storageAccountId format" } };
+  }
+  if (accessTier && !isValidAccessTier(accessTier)) {
+    return { status: 400, jsonBody: { error: "Invalid accessTier" } };
+  }
+
   try {
     const client = createOboGraphClient(token);
 
@@ -62,7 +73,7 @@ async function exportEnvironment(request: HttpRequest, context: InvocationContex
     context.error("Failed to export environment:", error);
     return {
       status: error.statusCode || 500,
-      jsonBody: { error: error.message || "Failed to export environment" },
+      jsonBody: { error: sanitizeErrorMessage(error) },
     };
   }
 }
@@ -102,6 +113,16 @@ async function importEnvironment(request: HttpRequest, context: InvocationContex
 
   if (!userId || !storageAccountId || !blobName) {
     return { status: 400, jsonBody: { error: "userId, storageAccountId, and blobName are required" } };
+  }
+
+  if (!isValidGuid(userId)) {
+    return { status: 400, jsonBody: { error: "Invalid userId format" } };
+  }
+  if (!isValidAzureResourceId(storageAccountId)) {
+    return { status: 400, jsonBody: { error: "Invalid storageAccountId format" } };
+  }
+  if (!isValidBlobName(blobName)) {
+    return { status: 400, jsonBody: { error: "Invalid blobName format" } };
   }
 
   try {
@@ -153,21 +174,21 @@ async function importEnvironment(request: HttpRequest, context: InvocationContex
     context.error("Failed to import environment:", error);
     return {
       status: error.statusCode || 500,
-      jsonBody: { error: error.message || "Failed to import environment" },
+      jsonBody: { error: sanitizeErrorMessage(error) },
     };
   }
 }
 
 app.http("exportEnvironment", {
   methods: ["POST"],
-  authLevel: "anonymous",
+  authLevel: "function",
   route: "environments/export",
   handler: exportEnvironment,
 });
 
 app.http("importEnvironment", {
   methods: ["POST"],
-  authLevel: "anonymous",
+  authLevel: "function",
   route: "environments/import",
   handler: importEnvironment,
 });

@@ -10,6 +10,8 @@ param location string = resourceGroup().location
 param tags object = {
   project: 'w365-swap'
   purpose: 'snapshot-archival'
+  'sfi-compliance': 'reviewed'
+  'data-classification': 'confidential'
 }
 
 module storage 'modules/storageAccount.bicep' = {

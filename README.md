@@ -21,7 +21,7 @@ Microsoft Dev Box stopped accepting new customers on November 1, 2025, with capa
 │            Azure Static Web Apps + MSAL.js          │
 │   ┌──────────┬──────────┬───────────┬────────────┐  │
 │   │  Switch  │ Snapshot │  Export   │  Import    │  │
-│   │  (tiles) │ (create/ │  (VHD →  │  (restore  │  │
+│   │  (tiles) │ (create/ │  (VHD →   │  (restore  │  │
 │   │          │  restore)│  archive) │  from VHD) │  │
 │   └──────────┴──────────┴───────────┴────────────┘  │
 ├─────────────────────────────────────────────────────┤

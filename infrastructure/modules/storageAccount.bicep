@@ -10,6 +10,12 @@ param tags object = {}
 @description('Allow public blob access for snapshot import.')
 param allowBlobPublicAccess bool = false
 
+@description('Allowed subnet resource IDs for storage network rules. Empty = no VNet restrictions (service endpoints only).')
+param allowedSubnetIds array = []
+
+@description('Allowed public IP addresses or CIDR ranges for storage access.')
+param allowedIpRanges array = []
+
 resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
   name: storageAccountName
   location: location
@@ -21,12 +27,20 @@ resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
   properties: {
     accessTier: 'Hot'
     allowBlobPublicAccess: allowBlobPublicAccess
-    allowSharedKeyAccess: true
+    allowSharedKeyAccess: false
     minimumTlsVersion: 'TLS1_2'
     supportsHttpsTrafficOnly: true
     networkAcls: {
-      defaultAction: 'Allow'
+      defaultAction: 'Deny'
       bypass: 'AzureServices'
+      virtualNetworkRules: [for subnetId in allowedSubnetIds: {
+        id: subnetId
+        action: 'Allow'
+      }]
+      ipRules: [for ip in allowedIpRanges: {
+        value: ip
+        action: 'Allow'
+      }]
     }
   }
 }
@@ -38,6 +52,10 @@ resource blobServices 'Microsoft.Storage/storageAccounts/blobServices@2023-05-01
     deleteRetentionPolicy: {
       enabled: true
       days: 30
+    }
+    containerDeleteRetentionPolicy: {
+      enabled: true
+      days: 14
     }
   }
 }

@@ -30,6 +30,11 @@ function Get-W365CloudPC {
     )
 
     if ($CloudPcId) {
+        # Validate GUID format to prevent path traversal
+        if ($CloudPcId -notmatch '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$') {
+            throw "Invalid CloudPcId format. Expected a GUID."
+        }
+
         $cloudPc = Invoke-GraphRequest -Uri "/deviceManagement/virtualEndpoint/cloudPCs/$CloudPcId"
 
         if ($IncludeSnapshots) {
@@ -42,7 +47,12 @@ function Get-W365CloudPC {
 
     $filter = ''
     if ($UserPrincipalName) {
-        $filter = "?`$filter=userPrincipalName eq '$UserPrincipalName'"
+        # Sanitize UPN to prevent OData injection
+        if ($UserPrincipalName -notmatch '^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$') {
+            throw "Invalid UserPrincipalName format."
+        }
+        $escapedUpn = $UserPrincipalName.Replace("'", "''")
+        $filter = "?`$filter=userPrincipalName eq '$escapedUpn'"
     }
 
     $response = Invoke-GraphRequest -Uri "/deviceManagement/virtualEndpoint/cloudPCs$filter"

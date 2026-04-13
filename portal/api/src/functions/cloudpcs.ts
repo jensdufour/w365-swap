@@ -1,5 +1,6 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { createOboGraphClient, extractBearerToken } from "../lib/graph-client.js";
+import { sanitizeErrorMessage } from "../lib/validation.js";
 
 /**
  * GET /api/cloudpcs
@@ -47,14 +48,14 @@ async function getCloudPCs(request: HttpRequest, context: InvocationContext): Pr
     context.error("Failed to get Cloud PCs:", error);
     return {
       status: error.statusCode || 500,
-      jsonBody: { error: error.message || "Failed to retrieve Cloud PCs" },
+      jsonBody: { error: sanitizeErrorMessage(error) },
     };
   }
 }
 
 app.http("getCloudPCs", {
   methods: ["GET"],
-  authLevel: "anonymous",
+  authLevel: "function",
   route: "cloudpcs",
   handler: getCloudPCs,
 });

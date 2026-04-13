@@ -1,5 +1,6 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { createOboGraphClient, extractBearerToken } from "../lib/graph-client.js";
+import { isValidGuid, sanitizeErrorMessage } from "../lib/validation.js";
 
 /**
  * POST /api/cloudpcs/:id/restore
@@ -15,8 +16,8 @@ async function restoreCloudPC(request: HttpRequest, context: InvocationContext):
   }
 
   const cloudPcId = request.params.id;
-  if (!cloudPcId) {
-    return { status: 400, jsonBody: { error: "Cloud PC ID is required" } };
+  if (!isValidGuid(cloudPcId)) {
+    return { status: 400, jsonBody: { error: "Invalid Cloud PC ID format" } };
   }
 
   let body: Record<string, unknown>;
@@ -54,7 +55,7 @@ async function restoreCloudPC(request: HttpRequest, context: InvocationContext):
     context.error("Failed to restore Cloud PC:", error);
     return {
       status: error.statusCode || 500,
-      jsonBody: { error: error.message || "Failed to restore Cloud PC" },
+      jsonBody: { error: sanitizeErrorMessage(error) },
     };
   }
 }
@@ -73,8 +74,8 @@ async function powerAction(request: HttpRequest, context: InvocationContext): Pr
   }
 
   const cloudPcId = request.params.id;
-  if (!cloudPcId) {
-    return { status: 400, jsonBody: { error: "Cloud PC ID is required" } };
+  if (!isValidGuid(cloudPcId)) {
+    return { status: 400, jsonBody: { error: "Invalid Cloud PC ID format" } };
   }
 
   let body: Record<string, unknown>;
@@ -112,21 +113,21 @@ async function powerAction(request: HttpRequest, context: InvocationContext): Pr
     context.error(`Failed to ${action} Cloud PC:`, error);
     return {
       status: error.statusCode || 500,
-      jsonBody: { error: error.message || `Failed to ${action} Cloud PC` },
+      jsonBody: { error: sanitizeErrorMessage(error) },
     };
   }
 }
 
 app.http("restoreCloudPC", {
   methods: ["POST"],
-  authLevel: "anonymous",
+  authLevel: "function",
   route: "cloudpcs/{id}/restore",
   handler: restoreCloudPC,
 });
 
 app.http("powerAction", {
   methods: ["POST"],
-  authLevel: "anonymous",
+  authLevel: "function",
   route: "cloudpcs/{id}/power",
   handler: powerAction,
 });

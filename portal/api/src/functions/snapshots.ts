@@ -1,5 +1,6 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { createOboGraphClient, extractBearerToken } from "../lib/graph-client.js";
+import { isValidGuid, isValidAzureResourceId, isValidAccessTier, sanitizeErrorMessage } from "../lib/validation.js";
 
 /**
  * GET /api/cloudpcs/:id/snapshots
@@ -12,8 +13,8 @@ async function getSnapshots(request: HttpRequest, context: InvocationContext): P
   }
 
   const cloudPcId = request.params.id;
-  if (!cloudPcId) {
-    return { status: 400, jsonBody: { error: "Cloud PC ID is required" } };
+  if (!isValidGuid(cloudPcId)) {
+    return { status: 400, jsonBody: { error: "Invalid Cloud PC ID format" } };
   }
 
   try {
@@ -28,7 +29,7 @@ async function getSnapshots(request: HttpRequest, context: InvocationContext): P
     context.error("Failed to get snapshots:", error);
     return {
       status: error.statusCode || 500,
-      jsonBody: { error: error.message || "Failed to retrieve snapshots" },
+      jsonBody: { error: sanitizeErrorMessage(error) },
     };
   }
 }
@@ -48,8 +49,8 @@ async function createSnapshot(request: HttpRequest, context: InvocationContext):
   }
 
   const cloudPcId = request.params.id;
-  if (!cloudPcId) {
-    return { status: 400, jsonBody: { error: "Cloud PC ID is required" } };
+  if (!isValidGuid(cloudPcId)) {
+    return { status: 400, jsonBody: { error: "Invalid Cloud PC ID format" } };
   }
 
   try {
@@ -57,8 +58,18 @@ async function createSnapshot(request: HttpRequest, context: InvocationContext):
     const body = await request.json().catch(() => ({})) as Record<string, unknown>;
 
     const requestBody: Record<string, unknown> = {};
-    if (body.storageAccountId) requestBody.storageAccountId = body.storageAccountId;
-    if (body.accessTier) requestBody.accessTier = body.accessTier;
+    if (body.storageAccountId) {
+      if (!isValidAzureResourceId(body.storageAccountId as string)) {
+        return { status: 400, jsonBody: { error: "Invalid storageAccountId format" } };
+      }
+      requestBody.storageAccountId = body.storageAccountId;
+    }
+    if (body.accessTier) {
+      if (!isValidAccessTier(body.accessTier as string)) {
+        return { status: 400, jsonBody: { error: "Invalid accessTier. Must be hot, cool, cold, or archive" } };
+      }
+      requestBody.accessTier = body.accessTier;
+    }
 
     await client
       .api(`/deviceManagement/virtualEndpoint/cloudPCs/${cloudPcId}/createSnapshot`)
@@ -79,21 +90,21 @@ async function createSnapshot(request: HttpRequest, context: InvocationContext):
     context.error("Failed to create snapshot:", error);
     return {
       status: error.statusCode || 500,
-      jsonBody: { error: error.message || "Failed to create snapshot" },
+      jsonBody: { error: sanitizeErrorMessage(error) },
     };
   }
 }
 
 app.http("getSnapshots", {
   methods: ["GET"],
-  authLevel: "anonymous",
+  authLevel: "function",
   route: "cloudpcs/{id}/snapshots",
   handler: getSnapshots,
 });
 
 app.http("createSnapshot", {
   methods: ["POST"],
-  authLevel: "anonymous",
+  authLevel: "function",
   route: "cloudpcs/{id}/snapshots",
   handler: createSnapshot,
 });
