@@ -185,15 +185,6 @@ w365-swap/
 │   │       └── lib/
 │   │           ├── api-client.ts    # Fetch wrapper for API calls
 │   │           └── msal-config.ts   # MSAL.js auth configuration
-│   └── infrastructure/          # (Legacy — kept for reference, azd uses infra/)
-│       └── main.bicep
-├── infrastructure/              # (Legacy — kept for reference, azd uses infra/)
-│   ├── main.bicep
-│   ├── main.bicepparam
-│   ├── modules/
-│   │   └── storageAccount.bicep
-│   ├── deploy.ps1
-│   └── validate.ps1
 ├── src/                         # PowerShell CLI module
 │   ├── W365Swap.psm1
 │   ├── W365Swap.psd1
