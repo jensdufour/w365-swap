@@ -61,93 +61,106 @@ Microsoft Dev Box stopped accepting new customers on November 1, 2025, with capa
 
 ## Prerequisites
 
-### CLI (PowerShell module)
-
+- [Azure Developer CLI (`azd`)](https://learn.microsoft.com/azure/developer/azure-developer-cli/install-azd) 1.9+
 - PowerShell 7+
+- Node.js 20+
 - Azure CLI 2.50+
-- An Entra ID App Registration with `CloudPC.ReadWrite.All` permissions
-- Windows 365 Enterprise licenses
-- An Azure subscription for VHD storage
+- An Azure subscription with permissions to create resources
+- Windows 365 Enterprise licenses (for actual Cloud PCs)
 
-### Web Portal
-
-- Node.js 18+
-- An Entra ID App Registration with a SPA redirect URI
-- Azure Static Web Apps (for hosting)
-- Azure Functions (for API backend)
-
-## Quick Start — CLI
+## Quick Start — Deploy Everything
 
 ```powershell
-# 1. Deploy storage infrastructure
-cd infrastructure
-Copy-Item ..\.env.example ..\.env
-# Edit .env with your values
-.\deploy.ps1
+# 1. Login to Azure
+azd auth login
 
-# 2. Import the module
+# 2. Create an environment and deploy (infra + code)
+azd up
+```
+
+That's it. `azd up` will:
+1. **Pre-provision hook** → create the Entra ID app registration, API permissions, SPA platform, exposed API scope, and client secret
+2. **Provision** → deploy all Azure infrastructure (resource group, storage account, Key Vault, Functions App, Static Web App, RBAC)
+3. **Post-provision hook** → patch the SPA redirect URI with the production SWA URL, assign storage RBAC to the Function App identity, write local dev config files
+4. **Deploy** → build and deploy the API + frontend
+
+> **Note**: If you're not a Global/Application Administrator in Entra ID, an admin must grant consent for `CloudPC.ReadWrite.All` in the Azure Portal after the first deploy.
+
+### Set up CI/CD
+
+```powershell
+azd pipeline config
+```
+
+Creates a GitHub Actions workflow with federated credentials. After this, `git push` to `main` triggers automatic deployment.
+
+### Tear down
+
+```powershell
+azd down
+```
+
+### Multiple environments
+
+```powershell
+azd env new staging
+azd up              # deploys isolated staging environment
+```
+
+## Quick Start — CLI Only
+
+The PowerShell module can be used standalone without the portal:
+
+```powershell
+# 1. Import the module
 Import-Module .\src\W365Swap.psd1
 
-# 3. Connect
+# 2. Connect (interactive device code flow)
 Connect-W365Swap -TenantId $env:TENANT_ID -ClientId $env:CLIENT_ID -DeviceCode
 
-# 4. List environments for a user
+# 3. List environments for a user
 Get-W365CloudPC -UserPrincipalName "developer@contoso.com"
 
-# 5. Snapshot current state
+# 4. Snapshot current state
 New-W365Snapshot -CloudPcId "<id>" -Label "pre-refactor"
 
-# 6. Export environment to storage for archival
+# 5. Export environment to storage for archival
 Export-W365Environment -CloudPcId "<id>" -ProjectName "project-alpha" -StorageAccountId "<storageId>"
 
-# 7. Import archived environment
+# 6. Import archived environment
 Import-W365Environment -ProjectName "project-alpha" -UserId "<userId>" -StorageAccountId "<storageId>"
 
-# 8. Check operation status
+# 7. Check operation status
 Get-W365SwapStatus -OperationId "<id>"
 ```
 
-## Quick Start — Web Portal
+## Local Development
 
-```bash
-# 1. Configure environment
-cd portal
-cp .env.example .env
-# Edit .env with your Entra ID app registration values
+After `azd up`, local dev config files are generated automatically:
 
-# 2. Install API dependencies
-cd api && npm install && cd ..
-
-# 3. Install web dependencies
-cd web && npm install && cd ..
-
-# 4. Run API locally
-cd api && npm start &
-
-# 5. Run web locally
-cd web && npm run dev
+```powershell
+# Portal frontend
+cd portal/web && npm install && npm run dev
 # Open http://localhost:3000
+
+# API backend (separate terminal)
+cd portal/api && npm install && npm start
 ```
-
-### Portal Entra ID App Registration
-
-Register an app in Entra ID with the following settings:
-
-1. **Authentication** → Add SPA platform → Redirect URI: `http://localhost:3000` (dev) / your SWA URL (prod)
-2. **API Permissions** → Add `CloudPC.ReadWrite.All` (delegated) and `User.Read`
-3. Copy the **Application (client) ID** and **Directory (tenant) ID** to `portal/.env`
 
 ## Project Structure
 
 ```
 w365-swap/
-├── infrastructure/              # Bicep IaC for VHD storage
-│   ├── main.bicep
-│   ├── main.bicepparam
-│   ├── modules/
-│   │   └── storageAccount.bicep
-│   ├── deploy.ps1
-│   └── validate.ps1
+├── azure.yaml                   # Azure Developer CLI manifest
+├── infra/                       # Consolidated Bicep IaC (azd convention)
+│   ├── main.bicep               #   Subscription-scoped orchestrator
+│   ├── main.parameters.json     #   Parameter bindings from azd env
+│   └── modules/
+│       ├── storage-account.bicep #  Storage + lifecycle tiering
+│       └── portal.bicep          #  Key Vault + Functions + SWA
+├── scripts/                     # azd hook scripts
+│   ├── entra-app.ps1            #   Pre-provision: Entra ID app registration
+│   └── post-provision.ps1       #   Post-provision: redirect URI + RBAC + local config
 ├── portal/                      # Self-service web portal
 │   ├── .env.example
 │   ├── api/                     # Azure Functions API backend
@@ -161,45 +174,36 @@ w365-swap/
 │   │       │   └── environments.ts  # GET/POST /api/environments
 │   │       └── lib/
 │   │           ├── graph-client.ts  # OBO token + Graph REST calls
-│   │           └── types.ts         # Shared TypeScript types
+│   │           ├── types.ts         # Shared TypeScript types
+│   │           └── validation.ts    # Input validation helpers
 │   ├── web/                     # Next.js frontend
 │   │   ├── package.json
 │   │   ├── staticwebapp.config.json
 │   │   └── src/
 │   │       ├── app/             # Next.js App Router pages
-│   │       │   ├── layout.tsx
-│   │       │   └── page.tsx
 │   │       ├── components/      # React components
-│   │       │   ├── AuthProvider.tsx
-│   │       │   ├── CloudPCCard.tsx      # Per-CPC tile card
-│   │       │   ├── CloudPCDashboard.tsx # Main dashboard grid
-│   │       │   └── SnapshotPanel.tsx    # Snapshot list + actions
 │   │       └── lib/
 │   │           ├── api-client.ts    # Fetch wrapper for API calls
 │   │           └── msal-config.ts   # MSAL.js auth configuration
-│   └── infrastructure/          # Bicep for SWA + Functions
+│   └── infrastructure/          # (Legacy — kept for reference, azd uses infra/)
 │       └── main.bicep
+├── infrastructure/              # (Legacy — kept for reference, azd uses infra/)
+│   ├── main.bicep
+│   ├── main.bicepparam
+│   ├── modules/
+│   │   └── storageAccount.bicep
+│   ├── deploy.ps1
+│   └── validate.ps1
 ├── src/                         # PowerShell CLI module
 │   ├── W365Swap.psm1
 │   ├── W365Swap.psd1
 │   ├── functions/               # 9 public cmdlets
-│   │   ├── Connect-W365Swap.ps1
-│   │   ├── Get-W365CloudPC.ps1
-│   │   ├── New-W365Snapshot.ps1
-│   │   ├── Export-W365Environment.ps1
-│   │   ├── Import-W365Environment.ps1
-│   │   ├── Switch-W365Environment.ps1
-│   │   ├── Restore-W365Environment.ps1
-│   │   ├── Get-W365SwapStatus.ps1
-│   │   └── Remove-W365ArchivedEnvironment.ps1
 │   └── helpers/
 │       ├── GraphApi.ps1         # Token cache + Graph REST
 │       └── StateManager.ps1     # Local JSON state tracking
-├── config/
-│   └── environments.json.example
 ├── tests/
 │   └── W365Swap.Tests.ps1      # Pester v3 tests (10 passing)
-├── .env.example
+├── .env.example                 # CLI-only environment template
 ├── .gitignore
 ├── LICENSE
 └── README.md

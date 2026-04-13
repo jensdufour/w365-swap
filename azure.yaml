@@ -1,0 +1,35 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Azure/azure-dev/main/schemas/v1.0/azure.yaml.json
+name: w365-swap
+metadata:
+  template: w365-swap@0.1.0
+
+hooks:
+  preprovision:
+    shell: pwsh
+    run: ./scripts/entra-app.ps1
+    interactive: true
+    continueOnError: false
+  postprovision:
+    shell: pwsh
+    run: ./scripts/post-provision.ps1
+    interactive: false
+    continueOnError: false
+
+services:
+  api:
+    project: ./portal/api
+    language: ts
+    host: function
+    hooks:
+      prepackage:
+        shell: pwsh
+        run: npm run build
+
+  web:
+    project: ./portal/web
+    language: ts
+    host: staticwebapp
+    hooks:
+      prepackage:
+        shell: pwsh
+        run: npm run build
