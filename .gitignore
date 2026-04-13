@@ -20,3 +20,17 @@ Thumbs.db
 # Test results
 TestResults/
 *.xml
+
+# Node.js
+node_modules/
+.next/
+out/
+dist/
+
+# Azure Functions
+portal/api/local.settings.json
+
+# Next.js
+portal/web/.env.local
+portal/web/.env.development.local
+portal/web/.env.production.local
