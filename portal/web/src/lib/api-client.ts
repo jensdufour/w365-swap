@@ -33,7 +33,12 @@ async function apiRequest<T>(
     },
   });
 
-  const json = await response.json();
+  let json: any;
+  try {
+    json = await response.json();
+  } catch {
+    throw new Error(`API request failed: ${response.status} ${response.statusText}`);
+  }
 
   if (!response.ok) {
     throw new Error(json.error || `API request failed: ${response.status}`);
@@ -42,39 +47,24 @@ async function apiRequest<T>(
   return json.data as T;
 }
 
-/** Cloud PC API client */
+/** Cloud PC & Swap API client */
 export const cloudPcApi = {
-  list: (msal: IPublicClientApplication, includeSnapshots = false) =>
-    apiRequest<any[]>(msal, `/cloudpcs${includeSnapshots ? "?includeSnapshots=true" : ""}`),
+  list: (msal: IPublicClientApplication) =>
+    apiRequest<any[]>(msal, `/cloudpcs`),
 
-  getSnapshots: (msal: IPublicClientApplication, cloudPcId: string) =>
-    apiRequest<any[]>(msal, `/cloudpcs/${cloudPcId}/snapshots`),
-
-  createSnapshot: (msal: IPublicClientApplication, cloudPcId: string, options?: { storageAccountId?: string; accessTier?: string }) =>
-    apiRequest<any>(msal, `/cloudpcs/${cloudPcId}/snapshots`, {
-      method: "POST",
-      body: JSON.stringify(options || {}),
-    }),
-
-  restore: (msal: IPublicClientApplication, cloudPcId: string, snapshotId: string) =>
-    apiRequest<any>(msal, `/cloudpcs/${cloudPcId}/restore`, {
-      method: "POST",
-      body: JSON.stringify({ snapshotId }),
-    }),
-
-  power: (msal: IPublicClientApplication, cloudPcId: string, action: "start" | "stop") =>
-    apiRequest<any>(msal, `/cloudpcs/${cloudPcId}/power`, {
-      method: "POST",
-      body: JSON.stringify({ action }),
-    }),
-
-  exportEnv: (msal: IPublicClientApplication, data: { cloudPcId: string; projectName: string; storageAccountId: string; accessTier?: string }) =>
+  /** Save a swap: export Cloud PC VHD to blob storage */
+  saveSwap: (msal: IPublicClientApplication, data: { cloudPcId: string; projectName: string; storageAccountId: string; accessTier?: string }) =>
     apiRequest<any>(msal, `/environments/export`, {
       method: "POST",
       body: JSON.stringify(data),
     }),
 
-  importEnv: (msal: IPublicClientApplication, data: { userId: string; storageAccountId: string; blobName: string; containerName?: string; guestStateBlobName?: string }) =>
+  /** List saved swaps (VHD blobs in storage) */
+  listSwaps: (msal: IPublicClientApplication) =>
+    apiRequest<any[]>(msal, `/swaps`),
+
+  /** Load a swap: import VHD from storage back into a Cloud PC */
+  loadSwap: (msal: IPublicClientApplication, data: { userId: string; storageAccountId: string; blobName: string; containerName?: string }) =>
     apiRequest<any>(msal, `/environments/import`, {
       method: "POST",
       body: JSON.stringify(data),

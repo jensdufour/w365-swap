@@ -97,14 +97,14 @@ async function createSnapshot(request: HttpRequest, context: InvocationContext):
 
 app.http("getSnapshots", {
   methods: ["GET"],
-  authLevel: "function",
+  authLevel: "anonymous",
   route: "cloudpcs/{id}/snapshots",
   handler: getSnapshots,
 });
 
 app.http("createSnapshot", {
   methods: ["POST"],
-  authLevel: "function",
+  authLevel: "anonymous",
   route: "cloudpcs/{id}/snapshots",
   handler: createSnapshot,
 });

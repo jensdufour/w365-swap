@@ -55,7 +55,7 @@ async function getCloudPCs(request: HttpRequest, context: InvocationContext): Pr
 
 app.http("getCloudPCs", {
   methods: ["GET"],
-  authLevel: "function",
+  authLevel: "anonymous",
   route: "cloudpcs",
   handler: getCloudPCs,
 });

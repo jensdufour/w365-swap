@@ -20,10 +20,52 @@ param clientId string
 @description('Entra ID app registration client secret.')
 param clientSecret string
 
+@description('Subnet ID for Function App VNet integration.')
+param integrationSubnetId string
+
+@description('Subnet ID for private endpoints.')
+param endpointsSubnetId string
+
+@description('Private DNS zone resource ID for Key Vault.')
+param kvDnsZoneId string
+
 var staticWebAppName = '${namePrefix}-portal'
 var functionAppName = '${namePrefix}-api'
 var appServicePlanName = '${namePrefix}-plan'
 var keyVaultName = '${namePrefix}-kv'
+var funcStorageName = replace('stfunc${namePrefix}', '-', '')
+
+// ---------------------------------------------------------------------------
+// Storage Account — dedicated for Function App runtime (no network restrictions)
+// ---------------------------------------------------------------------------
+
+resource funcStorage 'Microsoft.Storage/storageAccounts@2023-05-01' = {
+  name: funcStorageName
+  location: location
+  tags: tags
+  kind: 'StorageV2'
+  sku: {
+    name: 'Standard_LRS'
+  }
+  properties: {
+    supportsHttpsTrafficOnly: true
+    minimumTlsVersion: 'TLS1_2'
+    allowSharedKeyAccess: true
+    networkAcls: {
+      defaultAction: 'Deny'
+      bypass: 'AzureServices'
+      virtualNetworkRules: [
+        {
+          id: integrationSubnetId
+          action: 'Allow'
+        }
+      ]
+    }
+  }
+}
+
+// Connection string not usable — CDX policy disables shared key access.
+// Use managed identity-based AzureWebJobsStorage instead.
 
 // ---------------------------------------------------------------------------
 // Key Vault — secure secret storage (SFI: no plaintext secrets in app settings)
@@ -43,10 +85,6 @@ resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
     enableSoftDelete: true
     softDeleteRetentionInDays: 90
     enablePurgeProtection: true
-    networkAcls: {
-      defaultAction: 'Deny'
-      bypass: 'AzureServices'
-    }
   }
 }
 
@@ -68,8 +106,8 @@ resource appServicePlan 'Microsoft.Web/serverfarms@2023-12-01' = {
   tags: tags
   kind: 'functionapp'
   sku: {
-    name: 'Y1'
-    tier: 'Dynamic'
+    name: 'B1'
+    tier: 'Basic'
   }
 }
 
@@ -84,8 +122,11 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
   properties: {
     serverFarmId: appServicePlan.id
     httpsOnly: true
+    virtualNetworkSubnetId: integrationSubnetId
+    vnetRouteAllEnabled: true
     siteConfig: {
       appSettings: [
+        { name: 'AzureWebJobsStorage__accountName', value: funcStorage.name }
         { name: 'AZURE_TENANT_ID', value: tenantId }
         { name: 'AZURE_CLIENT_ID', value: clientId }
         { name: 'AZURE_CLIENT_SECRET', value: '@Microsoft.KeyVault(VaultName=${keyVaultName};SecretName=azure-client-secret)' }
@@ -93,7 +134,10 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
         { name: 'FUNCTIONS_WORKER_RUNTIME', value: 'node' }
         { name: 'WEBSITE_NODE_DEFAULT_VERSION', value: '~20' }
         { name: 'STORAGE_ACCOUNT_ID', value: storageAccountId }
+        { name: 'SCM_DO_BUILD_DURING_DEPLOYMENT', value: 'true' }
+        { name: 'ENABLE_ORYX_BUILD', value: 'true' }
       ]
+      alwaysOn: true
       minTlsVersion: '1.2'
       ftpsState: 'Disabled'
       cors: {
@@ -106,12 +150,63 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
   }
 }
 
+// Override EasyAuth to AllowAnonymous — SWA linked backend auto-enables EasyAuth
+// with RedirectToLoginPage, which blocks parameterised API routes. Our function
+// handlers validate Bearer tokens themselves.
+// dependsOn linkedBackend so this runs AFTER the linked backend resets auth.
+resource functionAppAuth 'Microsoft.Web/sites/config@2023-12-01' = {
+  parent: functionApp
+  name: 'authsettingsV2'
+  dependsOn: [staticWebAppLinkedBackend]
+  properties: {
+    platform: {
+      enabled: true
+    }
+    globalValidation: {
+      unauthenticatedClientAction: 'AllowAnonymous'
+    }
+  }
+}
+
 // Grant the Function App identity access to Key Vault secrets
 resource kvRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(keyVault.id, functionApp.id, 'Key Vault Secrets User')
+  name: guid(keyVault.id, functionAppName, 'Key Vault Secrets User')
   scope: keyVault
   properties: {
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '4633458b-17de-408a-b874-0445c86b69e6')
+    principalId: functionApp.identity.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+// Grant the Function App identity Storage Blob Data Owner on func storage
+resource storageBlobRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(funcStorage.id, functionAppName, 'Storage Blob Data Owner')
+  scope: funcStorage
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'b7e6dc6d-f1e8-4753-8033-0f276bb0955b')
+    principalId: functionApp.identity.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+// Grant the Function App identity Storage Queue Data Contributor on func storage
+resource storageQueueRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(funcStorage.id, functionAppName, 'Storage Queue Data Contributor')
+  scope: funcStorage
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '974c5e8b-45b9-4653-ba55-5f855dd0fb88')
+    principalId: functionApp.identity.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+// Grant the Function App identity Storage Table Data Contributor on func storage
+resource storageTableRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(funcStorage.id, functionAppName, 'Storage Table Data Contributor')
+  scope: funcStorage
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3')
     principalId: functionApp.identity.principalId
     principalType: 'ServicePrincipal'
   }
@@ -126,8 +221,8 @@ resource staticWebApp 'Microsoft.Web/staticSites@2023-12-01' = {
   location: location
   tags: union(tags, { 'azd-service-name': 'web' })
   sku: {
-    name: 'Free'
-    tier: 'Free'
+    name: 'Standard'
+    tier: 'Standard'
   }
   properties: {
     buildProperties: {
@@ -155,4 +250,44 @@ output staticWebAppUrl string = 'https://${staticWebApp.properties.defaultHostna
 output staticWebAppName string = staticWebApp.name
 output functionAppUrl string = 'https://${functionApp.properties.defaultHostName}'
 output functionAppName string = functionApp.name
+// ---------------------------------------------------------------------------
+// Private Endpoint — Key Vault (works when publicNetworkAccess is Disabled)
+// ---------------------------------------------------------------------------
+
+resource kvPrivateEndpoint 'Microsoft.Network/privateEndpoints@2024-01-01' = {
+  name: '${keyVaultName}-pe'
+  location: location
+  tags: tags
+  properties: {
+    subnet: {
+      id: endpointsSubnetId
+    }
+    privateLinkServiceConnections: [
+      {
+        name: '${keyVaultName}-plsc'
+        properties: {
+          privateLinkServiceId: keyVault.id
+          groupIds: ['vault']
+        }
+      }
+    ]
+  }
+}
+
+resource kvDnsZoneGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-01-01' = {
+  parent: kvPrivateEndpoint
+  name: 'default'
+  properties: {
+    privateDnsZoneConfigs: [
+      {
+        name: 'privatelink-vaultcore'
+        properties: {
+          privateDnsZoneId: kvDnsZoneId
+        }
+      }
+    ]
+  }
+}
+
 output keyVaultName string = keyVault.name
+output functionAppResourceId string = functionApp.id

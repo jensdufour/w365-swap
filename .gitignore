@@ -38,3 +38,7 @@ portal/api/local.settings.json
 portal/web/.env.local
 portal/web/.env.development.local
 portal/web/.env.production.local
+portal/web/.env.production
+portal/web/next-env.d.ts
+portal/web/next_function.js
+portal/web/public/.swa/

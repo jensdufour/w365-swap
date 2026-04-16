@@ -181,14 +181,14 @@ async function importEnvironment(request: HttpRequest, context: InvocationContex
 
 app.http("exportEnvironment", {
   methods: ["POST"],
-  authLevel: "function",
+  authLevel: "anonymous",
   route: "environments/export",
   handler: exportEnvironment,
 });
 
 app.http("importEnvironment", {
   methods: ["POST"],
-  authLevel: "function",
+  authLevel: "anonymous",
   route: "environments/import",
   handler: importEnvironment,
 });

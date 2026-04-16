@@ -26,12 +26,6 @@ param clientSecret string
 @description('Tags applied to all resources.')
 param tags object = {}
 
-@description('Allowed subnet resource IDs for storage network rules.')
-param allowedSubnetIds array = []
-
-@description('Allowed public IP addresses or CIDR ranges for storage access.')
-param allowedIpRanges array = []
-
 // ---------------------------------------------------------------------------
 // Resource Group
 // ---------------------------------------------------------------------------
@@ -48,6 +42,20 @@ resource rg 'Microsoft.Resources/resourceGroups@2024-03-01' = {
 }
 
 // ---------------------------------------------------------------------------
+// Networking — VNet with integration & private endpoint subnets
+// ---------------------------------------------------------------------------
+
+module networking 'modules/networking.bicep' = {
+  name: 'networking'
+  scope: rg
+  params: {
+    namePrefix: namePrefix
+    location: location
+    tags: rg.tags
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Storage Account — VHD snapshot archival with lifecycle tiering
 // ---------------------------------------------------------------------------
 
@@ -58,8 +66,9 @@ module storage 'modules/storage-account.bicep' = {
     storageAccountName: replace('st${namePrefix}', '-', '')
     location: location
     tags: rg.tags
-    allowedSubnetIds: allowedSubnetIds
-    allowedIpRanges: allowedIpRanges
+    allowedSubnetIds: [
+      networking.outputs.integrationSubnetId
+    ]
   }
 }
 
@@ -78,6 +87,9 @@ module portal 'modules/portal.bicep' = {
     tenantId: tenantId
     clientId: clientId
     clientSecret: clientSecret
+    integrationSubnetId: networking.outputs.integrationSubnetId
+    endpointsSubnetId: networking.outputs.endpointsSubnetId
+    kvDnsZoneId: networking.outputs.kvDnsZoneId
   }
 }
 

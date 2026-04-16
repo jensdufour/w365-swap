@@ -29,7 +29,20 @@ services:
     project: ./portal/web
     language: ts
     host: staticwebapp
+    dist: out
     hooks:
       prepackage:
         shell: pwsh
-        run: npm run build
+        run: |
+          $tenantId = azd env get-value AZURE_TENANT_ID 2>$null
+          $clientId = azd env get-value AZURE_CLIENT_ID 2>$null
+          if ($clientId) {
+            $envContent = @"
+          NEXT_PUBLIC_AZURE_TENANT_ID=$tenantId
+          NEXT_PUBLIC_AZURE_CLIENT_ID=$clientId
+          NEXT_PUBLIC_API_BASE_URL=/api
+          "@
+            $envContent | Set-Content -Path ".env.production" -Encoding utf8
+            Write-Host "Wrote .env.production with clientId=$clientId"
+          }
+          npm run build

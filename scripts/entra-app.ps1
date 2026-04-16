@@ -117,12 +117,20 @@ if ($existingSwaUrl) {
     $redirectUris += $existingSwaUrl
 }
 
-$spaConfig = @{
-    redirectUris = $redirectUris
-} | ConvertTo-Json -Compress
+$appManifest = az ad app show --id $clientId --output json | ConvertFrom-Json
+$spaBody = @{
+    spa = @{
+        redirectUris = $redirectUris
+    }
+} | ConvertTo-Json -Depth 3
 
-az ad app update --id $clientId --set "spa=$spaConfig" --output none
-if ($LASTEXITCODE -ne 0) { Write-Warning "Failed to set SPA redirect URIs — update manually." }
+$tempFile = [System.IO.Path]::GetTempFileName()
+$spaBody | Set-Content $tempFile -Encoding utf8
+az rest --method PATCH --url "https://graph.microsoft.com/v1.0/applications/$($appManifest.id)" --body "@$tempFile" --headers "Content-Type=application/json" --output none
+$spaResult = $LASTEXITCODE
+Remove-Item $tempFile -ErrorAction SilentlyContinue
+if ($spaResult -ne 0) { Write-Warning "Failed to set SPA redirect URIs — update manually." }
+else { Write-Host "SPA redirect URIs configured." -ForegroundColor Green }
 
 # ---------------------------------------------------------------------------
 # Expose API scope (for OBO flow)

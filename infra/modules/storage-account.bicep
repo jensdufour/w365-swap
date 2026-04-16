@@ -10,11 +10,8 @@ param tags object = {}
 @description('Allow public blob access for snapshot import.')
 param allowBlobPublicAccess bool = false
 
-@description('Allowed subnet resource IDs for storage network rules.')
+@description('Subnet IDs allowed to access this storage account via service endpoints.')
 param allowedSubnetIds array = []
-
-@description('Allowed public IP addresses or CIDR ranges for storage access.')
-param allowedIpRanges array = []
 
 resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
   name: storageAccountName
@@ -30,15 +27,12 @@ resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
     allowSharedKeyAccess: false
     minimumTlsVersion: 'TLS1_2'
     supportsHttpsTrafficOnly: true
+    publicNetworkAccess: 'Enabled'
     networkAcls: {
       defaultAction: 'Deny'
       bypass: 'AzureServices'
       virtualNetworkRules: [for subnetId in allowedSubnetIds: {
         id: subnetId
-        action: 'Allow'
-      }]
-      ipRules: [for ip in allowedIpRanges: {
-        value: ip
         action: 'Allow'
       }]
     }

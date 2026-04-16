@@ -120,14 +120,14 @@ async function powerAction(request: HttpRequest, context: InvocationContext): Pr
 
 app.http("restoreCloudPC", {
   methods: ["POST"],
-  authLevel: "function",
+  authLevel: "anonymous",
   route: "cloudpcs/{id}/restore",
   handler: restoreCloudPC,
 });
 
 app.http("powerAction", {
   methods: ["POST"],
-  authLevel: "function",
+  authLevel: "anonymous",
   route: "cloudpcs/{id}/power",
   handler: powerAction,
 });
