@@ -171,10 +171,22 @@ async function importEnvironment(request: HttpRequest, context: InvocationContex
       },
     };
   } catch (error: any) {
-    context.error("Failed to import environment:", error);
+    context.error(
+      "Failed to import environment:",
+      "statusCode=", error?.statusCode,
+      "code=", error?.code,
+      "body=", typeof error?.body === "string" ? error.body : JSON.stringify(error?.body ?? {}),
+      error,
+    );
+    // Surface the Graph error code/message so the user can see why it failed
+    // instead of a generic 400. Graph errors from @microsoft/microsoft-graph-
+    // client expose .code and .message; fall back to sanitised Error.message.
+    const detail =
+      (typeof error?.code === "string" && typeof error?.message === "string" && `${error.code}: ${error.message}`) ||
+      sanitizeErrorMessage(error);
     return {
       status: error.statusCode || 500,
-      jsonBody: { error: sanitizeErrorMessage(error) },
+      jsonBody: { error: detail },
     };
   }
 }
