@@ -117,6 +117,45 @@ export function DesiredStatesPanel() {
             <span className="inline-flex items-center rounded-full bg-purple-100 text-purple-700 text-[10px] font-medium uppercase tracking-wide px-2 py-0.5">
               Preview · Simulated
             </span>
+            <span
+              className="relative inline-flex items-center group"
+              tabIndex={0}
+              aria-label="What Microsoft would need to ship"
+            >
+              <span className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-gray-300 text-[10px] text-gray-500 cursor-help select-none">
+                i
+              </span>
+              <span
+                role="tooltip"
+                className="pointer-events-none invisible group-hover:visible group-focus-within:visible absolute left-5 top-1/2 -translate-y-1/2 z-20 w-80 rounded-md border border-gray-200 bg-white p-3 text-[11px] leading-relaxed text-gray-700 shadow-lg"
+              >
+                <span className="block font-semibold text-gray-900 mb-1">
+                  What Microsoft would need to ship
+                </span>
+                <ul className="list-disc pl-4 space-y-1">
+                  <li>
+                    Decouple CPC compute from the OS disk (today they&apos;re one immutable unit).
+                  </li>
+                  <li>
+                    Graph action{" "}
+                    <code className="font-mono">POST /virtualEndpoint/cloudPCs/&#123;id&#125;/attachDisk</code>{" "}
+                    that swaps the boot disk and reboots.
+                  </li>
+                  <li>
+                    A first-class <code className="font-mono">cloudPcDiskImage</code> resource
+                    (per-user OS disks, not just gallery images).
+                  </li>
+                  <li>
+                    Licensing change: one Cloud PC license covers N owned disks, billed for storage
+                    only when detached.
+                  </li>
+                  <li>
+                    Per-disk identity/join state so attach doesn&apos;t require re-enrollment.
+                  </li>
+                </ul>
+                <span className="block mt-2 text-gray-400 italic">None of these exist today.</span>
+              </span>
+            </span>
           </h2>
           <p className="text-xs text-gray-500 mt-1 max-w-2xl">
             Vision of a future Windows 365 capability: pay once for the Cloud PC compute, then attach
