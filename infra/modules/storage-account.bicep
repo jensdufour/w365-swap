@@ -85,7 +85,14 @@ resource lifecyclePolicy 'Microsoft.Storage/storageAccounts/managementPolicies@2
           definition: {
             filters: {
               blobTypes: [ 'blockBlob' ]
-              prefixMatch: [ 'snapshots/' ]
+              // Match both the manually-created 'snapshots' container and the
+              // per-tenant containers Windows 365 creates when exporting via
+              // Graph createSnapshot (pattern: windows365-share-ent-<suffix>).
+              // Without the second prefix, W365-exported VHDs never tier down.
+              prefixMatch: [
+                'snapshots/'
+                'windows365-share-'
+              ]
             }
             actions: {
               baseBlob: {
