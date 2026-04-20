@@ -52,6 +52,10 @@ export const cloudPcApi = {
   list: (msal: IPublicClientApplication) =>
     apiRequest<any[]>(msal, `/cloudpcs`),
 
+  /** Remove a Cloud PC (enters grace period / end of life). */
+  deleteCloudPc: (msal: IPublicClientApplication, cloudPcId: string) =>
+    apiRequest<any>(msal, `/cloudpcs/${cloudPcId}`, { method: "DELETE" }),
+
   /** Save a swap: export Cloud PC VHD to blob storage */
   saveSwap: (msal: IPublicClientApplication, data: { cloudPcId: string; projectName: string; storageAccountId: string; accessTier?: string }) =>
     apiRequest<any>(msal, `/environments/export`, {
@@ -63,8 +67,13 @@ export const cloudPcApi = {
   listSwaps: (msal: IPublicClientApplication) =>
     apiRequest<any[]>(msal, `/swaps`),
 
-  /** Load a swap: import VHD from storage back into a Cloud PC */
-  loadSwap: (msal: IPublicClientApplication, data: { userId: string; storageAccountId: string; blobName: string; containerName?: string }) =>
+  /**
+   * Provision a new Cloud PC from a saved swap.
+   * Graph's importSnapshot always creates a NEW Cloud PC — it cannot replace
+   * an existing one in place. Use this together with deleteCloudPc to build
+   * a Replace-from-Swap workflow.
+   */
+  provisionFromSwap: (msal: IPublicClientApplication, data: { userId: string; storageAccountId: string; blobName: string; containerName?: string }) =>
     apiRequest<any>(msal, `/environments/import`, {
       method: "POST",
       body: JSON.stringify(data),

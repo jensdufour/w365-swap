@@ -1,14 +1,21 @@
 "use client";
 
 import { useMsal } from "@azure/msal-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { cloudPcApi } from "@/lib/api-client";
+
+/* =========================================================================
+ * Constants & local-storage helpers
+ * ========================================================================= */
 
 const STORAGE_ACCOUNT_ID = process.env.NEXT_PUBLIC_STORAGE_ACCOUNT_ID || "";
 const PENDING_SWAPS_STORAGE_KEY = "w365swap.pendingSwaps";
-// Drop pending entries after 3h — real exports complete in 20-60 min, so
-// anything older is almost certainly a failed export we should stop showing.
-const PENDING_SWAP_TTL_MS = 3 * 60 * 60 * 1000;
+const PENDING_REPLACEMENTS_STORAGE_KEY = "w365swap.pendingReplacements";
+// Drop pending entries after 3h — real operations complete well within that.
+const PENDING_TTL_MS = 3 * 60 * 60 * 1000;
+// The replacement CTA stays visible for 48h after the new CPC is ready, so
+// the user has a reasonable window to come back and confirm removal.
+const REPLACEMENT_VISIBLE_TTL_MS = 48 * 60 * 60 * 1000;
 
 type PendingSwap = {
   projectName: string;
@@ -17,44 +24,78 @@ type PendingSwap = {
   startedAt: string; // ISO
 };
 
-function loadPendingSwaps(): PendingSwap[] {
+type PendingReplacement = {
+  /** CPC id the user wants to replace — still present in their fleet until confirmed. */
+  oldCloudPcId: string;
+  oldCloudPcName: string;
+  swapBlobName: string;
+  swapFriendlyName: string;
+  /** CPC IDs that existed BEFORE the import kicked off; used to detect the newly-provisioned one. */
+  knownCloudPcIdsAtStart: string[];
+  /** Set once we identify the replacement CPC. */
+  newCloudPcId?: string;
+  /** Set once newCloudPcId reports a running/provisioned state. */
+  readyAt?: string; // ISO
+  startedAt: string; // ISO
+};
+
+function loadJson<T>(key: string, ttlMs: number): T[] {
   if (typeof window === "undefined") return [];
   try {
-    const raw = window.localStorage.getItem(PENDING_SWAPS_STORAGE_KEY);
+    const raw = window.localStorage.getItem(key);
     if (!raw) return [];
-    const parsed = JSON.parse(raw) as PendingSwap[];
-    const cutoff = Date.now() - PENDING_SWAP_TTL_MS;
-    return parsed.filter((p) => new Date(p.startedAt).getTime() >= cutoff);
+    const parsed = JSON.parse(raw) as Array<T & { startedAt: string }>;
+    const cutoff = Date.now() - ttlMs;
+    return parsed.filter((p) => new Date(p.startedAt).getTime() >= cutoff) as T[];
   } catch {
     return [];
   }
 }
 
-function savePendingSwaps(list: PendingSwap[]) {
+function saveJson<T>(key: string, list: T[]) {
   if (typeof window === "undefined") return;
   try {
-    window.localStorage.setItem(PENDING_SWAPS_STORAGE_KEY, JSON.stringify(list));
+    window.localStorage.setItem(key, JSON.stringify(list));
   } catch {
     /* ignore quota errors */
   }
 }
 
+/* =========================================================================
+ * Main dashboard
+ * ========================================================================= */
+
 export function CloudPCDashboard() {
   const { instance } = useMsal();
+
+  /* --- data state --- */
   const [cloudPCs, setCloudPCs] = useState<any[]>([]);
   const [swaps, setSwaps] = useState<any[]>([]);
-  const [pendingSwaps, setPendingSwaps] = useState<PendingSwap[]>([]);
   const [loading, setLoading] = useState(true);
   const [swapsLoading, setSwapsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [saving, setSaving] = useState<string | null>(null);
-  const [loadingSwap, setLoadingSwap] = useState<string | null>(null);
-  const [showSaveDialog, setShowSaveDialog] = useState<any | null>(null);
-  const [showLoadDialog, setShowLoadDialog] = useState<any | null>(null);
+
+  /* --- pending/local state --- */
+  const [pendingSwaps, setPendingSwaps] = useState<PendingSwap[]>([]);
+  const [pendingReplacements, setPendingReplacements] = useState<PendingReplacement[]>([]);
+
+  /* --- dialog state --- */
+  const [saveDialog, setSaveDialog] = useState<{ cpc: any } | null>(null);
+  const [provisionDialog, setProvisionDialog] = useState<{ swap: any } | null>(null);
+  const [replaceDialog, setReplaceDialog] = useState<{ cpc: any } | null>(null);
+  const [deleteConfirm, setDeleteConfirm] = useState<{ cpc: any; fromReplacement?: PendingReplacement } | null>(null);
+
+  /* --- per-action transient state --- */
+  const [busyCpc, setBusyCpc] = useState<string | null>(null);
+  const [busySwap, setBusySwap] = useState<string | null>(null);
+  const [toast, setToast] = useState<{ kind: "success" | "error" | "info"; msg: string } | null>(null);
+
+  /* ------------------------------------------------------------------ */
+  /* Data loaders                                                        */
+  /* ------------------------------------------------------------------ */
 
   const loadCloudPCs = useCallback(async () => {
     try {
-      setLoading(true);
       setError(null);
       const data = await cloudPcApi.list(instance);
       setCloudPCs(data);
@@ -67,10 +108,10 @@ export function CloudPCDashboard() {
 
   const loadSwaps = useCallback(async () => {
     try {
-      setSwapsLoading(true);
       const data = await cloudPcApi.listSwaps(instance);
       setSwaps(data);
     } catch (err: any) {
+      // Non-fatal — CPC list is still shown.
       console.error("Failed to load swaps:", err);
       setSwaps([]);
     } finally {
@@ -81,138 +122,190 @@ export function CloudPCDashboard() {
   useEffect(() => {
     loadCloudPCs();
     loadSwaps();
-    setPendingSwaps(loadPendingSwaps());
+    setPendingSwaps(loadJson<PendingSwap>(PENDING_SWAPS_STORAGE_KEY, PENDING_TTL_MS));
+    setPendingReplacements(
+      loadJson<PendingReplacement>(PENDING_REPLACEMENTS_STORAGE_KEY, REPLACEMENT_VISIBLE_TTL_MS),
+    );
   }, [loadCloudPCs, loadSwaps]);
 
-  // Persist pending swaps whenever they change.
-  useEffect(() => {
-    savePendingSwaps(pendingSwaps);
-  }, [pendingSwaps]);
+  useEffect(() => saveJson(PENDING_SWAPS_STORAGE_KEY, pendingSwaps), [pendingSwaps]);
+  useEffect(() => saveJson(PENDING_REPLACEMENTS_STORAGE_KEY, pendingReplacements), [pendingReplacements]);
 
-  // Drop pending entries once a matching completed blob appears in the swaps list.
-  // Windows 365 names exported blobs "CPC_<cloudPcId>_<guid>.vhd" — it does NOT
-  // include the user-supplied projectName — so we match on cloudPcId instead.
+  /* Drop pending swap rows once the completed VHD is visible.
+     W365 blob names embed the source cloudPcId (CPC_<cpcId>_<guid>.vhd). */
   useEffect(() => {
     if (pendingSwaps.length === 0 || swaps.length === 0) return;
-    const matched = new Set(
+    const done = new Set(
       pendingSwaps
         .filter((p) =>
-          swaps.some((s: any) =>
-            typeof s.name === "string" && s.name.toLowerCase().includes(p.cloudPcId.toLowerCase())
-          )
+          swaps.some(
+            (s: any) => typeof s.name === "string" && s.name.toLowerCase().includes(p.cloudPcId.toLowerCase()),
+          ),
         )
-        .map((p) => p.projectName)
+        .map((p) => p.projectName),
     );
-    if (matched.size > 0) {
-      setPendingSwaps((prev) => prev.filter((p) => !matched.has(p.projectName)));
+    if (done.size > 0) {
+      setPendingSwaps((prev) => prev.filter((p) => !done.has(p.projectName)));
     }
   }, [swaps, pendingSwaps]);
 
-  // Track operations that have been submitted (show progress in-dialog)
-  const [saveResult, setSaveResult] = useState<"success" | "error" | null>(null);
-  const [saveError, setSaveError] = useState<string | null>(null);
-  const [loadResult, setLoadResult] = useState<"success" | "error" | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
-
-  // Auto-poll swaps list when an export is in progress
-  const [pendingExports, setPendingExports] = useState<number>(0);
-
-  // Auto-poll swaps list while an export is in progress (either just-submitted
-  // or a leftover from a previous session persisted in localStorage).
+  /* Identify the replacement CPC as soon as a new one appears in the fleet. */
   useEffect(() => {
-    if (pendingExports === 0 && pendingSwaps.length === 0) return;
-    const interval = setInterval(() => loadSwaps(), 30_000);
-    return () => clearInterval(interval);
-  }, [pendingExports, pendingSwaps.length, loadSwaps]);
+    if (pendingReplacements.length === 0 || cloudPCs.length === 0) return;
+    setPendingReplacements((prev) =>
+      prev.map((r) => {
+        if (r.newCloudPcId) {
+          // Already identified — just update readyAt when it transitions to ready.
+          const cpc = cloudPCs.find((c) => c.id === r.newCloudPcId);
+          if (!r.readyAt && cpc && ["provisioned", "running"].includes(cpc.status)) {
+            return { ...r, readyAt: new Date().toISOString() };
+          }
+          return r;
+        }
+        const knownSet = new Set(r.knownCloudPcIdsAtStart);
+        const fresh = cloudPCs.find((c) => !knownSet.has(c.id) && c.id !== r.oldCloudPcId);
+        if (!fresh) return r;
+        const ready = ["provisioned", "running"].includes(fresh.status);
+        return {
+          ...r,
+          newCloudPcId: fresh.id,
+          readyAt: ready ? new Date().toISOString() : r.readyAt,
+        };
+      }),
+    );
+  }, [cloudPCs, pendingReplacements]);
 
-  const handleSaveSwap = async (
-    cloudPcId: string,
-    projectName: string,
-    accessTier: "hot" | "cool" | "cold" | "archive",
-  ) => {
-    setSaving(cloudPcId);
-    setSaveResult(null);
-    setSaveError(null);
+  /* Auto-poll while anything is in flight. */
+  const anythingPending = pendingSwaps.length > 0 || pendingReplacements.some((r) => !r.readyAt);
+  useEffect(() => {
+    if (!anythingPending) return;
+    const interval = setInterval(() => {
+      loadSwaps();
+      loadCloudPCs();
+    }, 30_000);
+    return () => clearInterval(interval);
+  }, [anythingPending, loadSwaps, loadCloudPCs]);
+
+  /* ------------------------------------------------------------------ */
+  /* Action handlers                                                     */
+  /* ------------------------------------------------------------------ */
+
+  const currentUserId = () => instance.getActiveAccount()?.localAccountId;
+
+  const showToast = (kind: "success" | "error" | "info", msg: string) => {
+    setToast({ kind, msg });
+    window.setTimeout(() => setToast(null), 6000);
+  };
+
+  async function handleSaveSwap(cpc: any, projectName: string, accessTier: "hot" | "cool" | "cold" | "archive") {
+    setBusyCpc(cpc.id);
     try {
       await cloudPcApi.saveSwap(instance, {
-        cloudPcId,
+        cloudPcId: cpc.id,
         projectName,
         storageAccountId: STORAGE_ACCOUNT_ID,
         accessTier,
       });
-      setSaveResult("success");
-      setPendingExports((n) => n + 1);
-      const cpc = cloudPCs.find((c) => c.id === cloudPcId);
-      setPendingSwaps((prev) => {
-        const next = prev.filter((p) => p.projectName !== projectName);
-        next.unshift({
+      setPendingSwaps((prev) => [
+        {
           projectName,
-          cloudPcId,
-          cloudPcName: cpc?.displayName || cloudPcId,
+          cloudPcId: cpc.id,
+          cloudPcName: cpc.displayName || cpc.id,
           startedAt: new Date().toISOString(),
-        });
-        return next;
-      });
+        },
+        ...prev.filter((p) => p.projectName !== projectName),
+      ]);
+      setSaveDialog(null);
+      showToast("success", `Exporting "${projectName}" — typically 20–60 min.`);
     } catch (err: any) {
-      setSaveError(err.message);
-      setSaveResult("error");
+      showToast("error", `Save failed: ${err.message}`);
     } finally {
-      setSaving(null);
+      setBusyCpc(null);
     }
-  };
+  }
 
-  const handleLoadSwap = async (blobName: string, containerName?: string) => {
-    const account = instance.getActiveAccount();
-    if (!account?.localAccountId) {
-      setLoadError("Cannot determine user ID. Please sign out and back in.");
-      setLoadResult("error");
+  async function handleProvisionFromSwap(swap: any) {
+    const userId = currentUserId();
+    if (!userId) {
+      showToast("error", "Cannot determine user ID. Sign out and back in.");
       return;
     }
-    setLoadingSwap(blobName);
-    setLoadResult(null);
-    setLoadError(null);
+    setBusySwap(swap.name);
     try {
-      await cloudPcApi.loadSwap(instance, {
-        userId: account.localAccountId,
+      await cloudPcApi.provisionFromSwap(instance, {
+        userId,
         storageAccountId: STORAGE_ACCOUNT_ID,
-        blobName,
-        containerName,
+        blobName: swap.name,
+        containerName: swap.containerName,
       });
-      setLoadResult("success");
+      setProvisionDialog(null);
+      showToast("success", "Provisioning new Cloud PC — typically 15–45 min.");
+      loadCloudPCs();
     } catch (err: any) {
-      setLoadError(err.message);
-      setLoadResult("error");
+      showToast("error", `Provisioning failed: ${err.message}`);
     } finally {
-      setLoadingSwap(null);
+      setBusySwap(null);
     }
-  };
+  }
 
-  const formatSize = (bytes: number) => {
-    if (bytes === 0) return "\u2014";
-    const gb = bytes / (1024 * 1024 * 1024);
-    return gb >= 1 ? `${gb.toFixed(1)} GB` : `${(bytes / (1024 * 1024)).toFixed(0)} MB`;
-  };
-
-  const formatDate = (iso: string) => {
-    if (!iso) return "\u2014";
-    return new Date(iso).toLocaleString(undefined, {
-      dateStyle: "medium",
-      timeStyle: "short",
-    });
-  };
-
-  const friendlyName = (blobName: string) => {
-    // Strip any container-like prefix and the file extension.
-    const base = blobName.replace(/^.*\//, "").replace(/\.(vhdx?|vmgs)$/i, "");
-    // Windows 365 exports are named "CPC_<cloudPcId>_<guid>". Look up the
-    // originating Cloud PC by ID so users see its display name instead of GUIDs.
-    const match = base.match(/^CPC_([0-9a-f-]{36})_/i);
-    if (match) {
-      const cpc = cloudPCs.find((c) => c.id?.toLowerCase() === match[1].toLowerCase());
-      if (cpc?.displayName) return cpc.displayName;
+  async function handleReplaceFromSwap(cpc: any, swap: any) {
+    const userId = currentUserId();
+    if (!userId) {
+      showToast("error", "Cannot determine user ID. Sign out and back in.");
+      return;
     }
-    return base;
-  };
+    setBusyCpc(cpc.id);
+    try {
+      await cloudPcApi.provisionFromSwap(instance, {
+        userId,
+        storageAccountId: STORAGE_ACCOUNT_ID,
+        blobName: swap.name,
+        containerName: swap.containerName,
+      });
+      setPendingReplacements((prev) => [
+        {
+          oldCloudPcId: cpc.id,
+          oldCloudPcName: cpc.displayName || cpc.id,
+          swapBlobName: swap.name,
+          swapFriendlyName: friendlyName(swap.name, cloudPCs),
+          knownCloudPcIdsAtStart: cloudPCs.map((c) => c.id),
+          startedAt: new Date().toISOString(),
+        },
+        ...prev.filter((r) => r.oldCloudPcId !== cpc.id),
+      ]);
+      setReplaceDialog(null);
+      showToast(
+        "success",
+        `Provisioning replacement for ${cpc.displayName}. You'll be asked to remove the old one once the new one is ready.`,
+      );
+      loadCloudPCs();
+    } catch (err: any) {
+      showToast("error", `Replacement start failed: ${err.message}`);
+    } finally {
+      setBusyCpc(null);
+    }
+  }
+
+  async function handleDeleteCpc(cpc: any, fromReplacement?: PendingReplacement) {
+    setBusyCpc(cpc.id);
+    try {
+      await cloudPcApi.deleteCloudPc(instance, cpc.id);
+      if (fromReplacement) {
+        setPendingReplacements((prev) => prev.filter((r) => r.oldCloudPcId !== cpc.id));
+      }
+      setDeleteConfirm(null);
+      showToast("success", `Removing ${cpc.displayName}. It will enter grace period per tenant policy.`);
+      loadCloudPCs();
+    } catch (err: any) {
+      showToast("error", `Delete failed: ${err.message}`);
+    } finally {
+      setBusyCpc(null);
+    }
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Render                                                              */
+  /* ------------------------------------------------------------------ */
 
   if (loading) {
     return (
@@ -234,93 +327,104 @@ export function CloudPCDashboard() {
     );
   }
 
+  const readyReplacements = pendingReplacements.filter((r) => r.readyAt);
+  const inFlightReplacements = pendingReplacements.filter((r) => !r.readyAt);
+
   return (
-    <div className="space-y-8">
-      {/* ─── Cloud PCs ─── */}
-      <section>
-        <div className="flex items-center justify-between mb-4">
-          <div>
-            <h2 className="text-xl font-bold text-gray-900">Your Cloud PCs</h2>
-            <p className="text-sm text-gray-500 mt-0.5">
-              Select a Cloud PC to save its current state as a swap
-            </p>
-          </div>
-          <button
-            onClick={() => {
-              loadCloudPCs();
-              loadSwaps();
-            }}
-            className="text-sm bg-white border border-gray-300 px-3 py-1.5 rounded-lg hover:bg-gray-50"
+    <div className="space-y-6">
+      {/* --- Explainer banner --- */}
+      <ExplainerBanner />
+
+      {/* --- Ready replacements CTA (top-priority action) --- */}
+      {readyReplacements.map((r) => {
+        const oldCpc = cloudPCs.find((c) => c.id === r.oldCloudPcId);
+        const newCpc = cloudPCs.find((c) => c.id === r.newCloudPcId);
+        if (!oldCpc) {
+          // Old already deleted — clear the tracker.
+          return null;
+        }
+        return (
+          <div
+            key={`ready-${r.oldCloudPcId}`}
+            className="bg-emerald-50 border border-emerald-300 rounded-lg p-4 flex items-start gap-3"
           >
-            Refresh
-          </button>
-        </div>
+            <svg className="w-6 h-6 text-emerald-600 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <div className="flex-1">
+              <p className="text-sm font-semibold text-emerald-900">
+                Replacement ready for {r.oldCloudPcName}
+              </p>
+              <p className="text-xs text-emerald-800 mt-0.5">
+                New Cloud PC {newCpc?.displayName ? `"${newCpc.displayName}"` : "(provisioning)"} is ready from
+                swap <strong>{r.swapFriendlyName}</strong>. You can remove the old one when ready.
+              </p>
+              <div className="flex gap-2 mt-3">
+                <button
+                  onClick={() => setDeleteConfirm({ cpc: oldCpc, fromReplacement: r })}
+                  className="bg-red-600 text-white text-sm px-3 py-1.5 rounded-lg hover:bg-red-700"
+                >
+                  Remove old Cloud PC
+                </button>
+                <button
+                  onClick={() =>
+                    setPendingReplacements((prev) => prev.filter((x) => x.oldCloudPcId !== r.oldCloudPcId))
+                  }
+                  className="text-sm text-emerald-800 hover:text-emerald-900 underline"
+                >
+                  Keep both
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })}
+
+      {/* --- Cloud PCs --- */}
+      <section>
+        <SectionHeader
+          title="Your Cloud PCs"
+          subtitle="Save the current state, replace a Cloud PC's state from a saved swap, or remove it."
+          onRefresh={() => {
+            loadCloudPCs();
+            loadSwaps();
+          }}
+        />
 
         {cloudPCs.length === 0 ? (
-          <div className="bg-white rounded-lg border border-gray-200 p-8 text-center text-gray-500 text-sm">
-            No Cloud PCs assigned to your account.
-          </div>
+          <EmptyCard>No Cloud PCs assigned to your account.</EmptyCard>
         ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
             {cloudPCs.map((cpc) => {
-              const isRunning = ["provisioned", "running"].includes(cpc.status);
+              const inFlight = inFlightReplacements.find((r) => r.oldCloudPcId === cpc.id);
               return (
-                <div
+                <CloudPcCard
                   key={cpc.id}
-                  className="bg-white rounded-lg border border-gray-200 p-4 flex items-center justify-between gap-3"
-                >
-                  <div className="min-w-0 flex-1">
-                    <div className="font-medium text-gray-900 truncate">{cpc.displayName}</div>
-                    <div className="flex items-center gap-2 mt-1">
-                      <span
-                        className={`inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full ${
-                          isRunning ? "bg-green-50 text-green-700" : "bg-gray-100 text-gray-600"
-                        }`}
-                      >
-                        <span
-                          className={`w-1.5 h-1.5 rounded-full ${
-                            isRunning ? "bg-green-500" : "bg-gray-400"
-                          }`}
-                        />
-                        {cpc.status}
-                      </span>
-                      {cpc.servicePlanName && (
-                        <span className="text-xs text-gray-400">{cpc.servicePlanName}</span>
-                      )}
-                    </div>
-                  </div>
-                  <button
-                    onClick={() => setShowSaveDialog(cpc)}
-                    disabled={saving === cpc.id}
-                    className="shrink-0 bg-blue-600 text-white text-sm px-4 py-2 rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors"
-                  >
-                    {saving === cpc.id ? "Saving..." : "Save Swap"}
-                  </button>
-                </div>
+                  cpc={cpc}
+                  busy={busyCpc === cpc.id}
+                  inFlightReplacement={inFlight}
+                  hasSwaps={swaps.length > 0}
+                  onSave={() => setSaveDialog({ cpc })}
+                  onReplace={() => setReplaceDialog({ cpc })}
+                  onDelete={() => setDeleteConfirm({ cpc })}
+                />
               );
             })}
           </div>
         )}
       </section>
 
-      {/* ─── Saved Swaps ─── */}
+      {/* --- Saved Swaps --- */}
       <section>
-        <div className="mb-4">
-          <h2 className="text-xl font-bold text-gray-900">Saved Swaps</h2>
-          <p className="text-sm text-gray-500 mt-0.5">
-            Previously exported environments stored in Azure &mdash; load any swap to provision a
-            new Cloud PC from it
-          </p>
-        </div>
+        <SectionHeader
+          title="Saved Swaps"
+          subtitle="Exported environments stored in your storage account. Provision a new Cloud PC from any swap."
+        />
 
         {swapsLoading && pendingSwaps.length === 0 && swaps.length === 0 ? (
           <div className="text-gray-500 text-sm py-4">Loading saved swaps...</div>
         ) : swaps.length === 0 && pendingSwaps.length === 0 ? (
-          <div className="bg-white rounded-lg border border-gray-200 p-8 text-center">
-            <p className="text-gray-500 text-sm">
-              No saved swaps yet. Save a Cloud PC environment to get started.
-            </p>
-          </div>
+          <EmptyCard>No saved swaps yet. Choose &quot;Save as swap&quot; on a Cloud PC to get started.</EmptyCard>
         ) : (
           <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
             <table className="w-full text-sm">
@@ -335,70 +439,22 @@ export function CloudPCDashboard() {
               </thead>
               <tbody>
                 {pendingSwaps.map((p) => (
-                  <tr
+                  <PendingSwapRow
                     key={`pending-${p.projectName}-${p.startedAt}`}
-                    className="border-b border-gray-100 last:border-0 bg-blue-50/40"
-                  >
-                    <td className="px-4 py-3 font-medium text-gray-900">
-                      <div className="flex items-center gap-2">
-                        <span className="inline-block w-3 h-3 border-2 border-blue-600 border-t-transparent rounded-full animate-spin" />
-                        {p.projectName}
-                      </div>
-                      <div className="text-xs text-gray-400 font-normal truncate max-w-xs">
-                        Exporting from {p.cloudPcName}
-                      </div>
-                    </td>
-                    <td className="px-4 py-3 text-gray-500 italic">&mdash;</td>
-                    <td className="px-4 py-3 text-gray-600">{formatDate(p.startedAt)}</td>
-                    <td className="px-4 py-3">
-                      <span className="text-xs px-2 py-0.5 rounded-full bg-blue-100 text-blue-700">
-                        Exporting
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 text-right">
-                      <span className="text-xs text-gray-500">typically 20&ndash;60 min</span>
-                      <button
-                        onClick={() =>
-                          setPendingSwaps((prev) =>
-                            prev.filter((x) => x.projectName !== p.projectName)
-                          )
-                        }
-                        className="ml-3 text-xs text-gray-400 hover:text-gray-600 underline"
-                        title="Dismiss this pending indicator (does not cancel the export)"
-                      >
-                        Dismiss
-                      </button>
-                    </td>
-                  </tr>
+                    pending={p}
+                    onDismiss={() =>
+                      setPendingSwaps((prev) => prev.filter((x) => x.projectName !== p.projectName))
+                    }
+                  />
                 ))}
                 {swaps.map((swap) => (
-                  <tr
+                  <SwapRow
                     key={swap.name}
-                    className="border-b border-gray-100 last:border-0 hover:bg-gray-50"
-                  >
-                    <td className="px-4 py-3 font-medium text-gray-900">
-                      {friendlyName(swap.name)}
-                      <div className="text-xs text-gray-400 font-normal truncate max-w-xs">
-                        {swap.name}
-                      </div>
-                    </td>
-                    <td className="px-4 py-3 text-gray-600">{formatSize(swap.size)}</td>
-                    <td className="px-4 py-3 text-gray-600">{formatDate(swap.createdOn)}</td>
-                    <td className="px-4 py-3">
-                      <span className="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-600">
-                        {swap.accessTier || "\u2014"}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 text-right">
-                      <button
-                        onClick={() => setShowLoadDialog(swap)}
-                        disabled={loadingSwap === swap.name}
-                        className="bg-green-600 text-white text-sm px-4 py-1.5 rounded-lg hover:bg-green-700 disabled:opacity-50 transition-colors"
-                      >
-                        {loadingSwap === swap.name ? "Loading..." : "Load Swap"}
-                      </button>
-                    </td>
-                  </tr>
+                    swap={swap}
+                    cloudPCs={cloudPCs}
+                    busy={busySwap === swap.name}
+                    onProvision={() => setProvisionDialog({ swap })}
+                  />
                 ))}
               </tbody>
             </table>
@@ -406,317 +462,601 @@ export function CloudPCDashboard() {
         )}
       </section>
 
-      {/* ─── Save Swap dialog ─── */}
-      {showSaveDialog && (
+      {/* --- Dialogs --- */}
+      {saveDialog && (
         <SaveSwapDialog
-          cloudPC={showSaveDialog}
-          saving={saving === showSaveDialog.id}
-          result={saveResult}
-          errorMessage={saveError}
-          onSave={(name, tier) => handleSaveSwap(showSaveDialog.id, name, tier)}
-          onClose={() => {
-            setShowSaveDialog(null);
-            setSaveResult(null);
-            setSaveError(null);
-          }}
+          cpc={saveDialog.cpc}
+          busy={busyCpc === saveDialog.cpc.id}
+          onCancel={() => setSaveDialog(null)}
+          onConfirm={(name, tier) => handleSaveSwap(saveDialog.cpc, name, tier)}
+        />
+      )}
+      {provisionDialog && (
+        <ProvisionDialog
+          swap={provisionDialog.swap}
+          cloudPCs={cloudPCs}
+          busy={busySwap === provisionDialog.swap.name}
+          onCancel={() => setProvisionDialog(null)}
+          onConfirm={() => handleProvisionFromSwap(provisionDialog.swap)}
+        />
+      )}
+      {replaceDialog && (
+        <ReplaceDialog
+          cpc={replaceDialog.cpc}
+          swaps={swaps}
+          cloudPCs={cloudPCs}
+          busy={busyCpc === replaceDialog.cpc.id}
+          onCancel={() => setReplaceDialog(null)}
+          onConfirm={(swap) => handleReplaceFromSwap(replaceDialog.cpc, swap)}
+        />
+      )}
+      {deleteConfirm && (
+        <DeleteConfirmDialog
+          cpc={deleteConfirm.cpc}
+          isReplacement={!!deleteConfirm.fromReplacement}
+          busy={busyCpc === deleteConfirm.cpc.id}
+          onCancel={() => setDeleteConfirm(null)}
+          onConfirm={() => handleDeleteCpc(deleteConfirm.cpc, deleteConfirm.fromReplacement)}
         />
       )}
 
-      {/* ─── Load Swap dialog ─── */}
-      {showLoadDialog && (
-        <LoadSwapDialog
-          swap={showLoadDialog}
-          loading={loadingSwap === showLoadDialog.name}
-          result={loadResult}
-          errorMessage={loadError}
-          onLoad={() => handleLoadSwap(showLoadDialog.name, showLoadDialog.containerName)}
-          onClose={() => {
-            setShowLoadDialog(null);
-            setLoadResult(null);
-            setLoadError(null);
-          }}
-        />
-      )}
+      {toast && <Toast kind={toast.kind} msg={toast.msg} onClose={() => setToast(null)} />}
     </div>
   );
 }
 
-/* ─── Indeterminate Progress Bar ─── */
-function ProgressBar({ label }: { label: string }) {
+/* =========================================================================
+ * Small helpers & formatters
+ * ========================================================================= */
+
+function friendlyName(blobName: string, cloudPCs: any[]): string {
+  const base = blobName.replace(/^.*\//, "").replace(/\.(vhdx?|vmgs)$/i, "");
+  const match = base.match(/^CPC_([0-9a-f-]{36})_/i);
+  if (match) {
+    const cpc = cloudPCs.find((c) => c.id?.toLowerCase() === match[1].toLowerCase());
+    if (cpc?.displayName) return cpc.displayName;
+  }
+  return base;
+}
+
+function formatSize(bytes: number) {
+  if (!bytes) return "—";
+  const gb = bytes / (1024 * 1024 * 1024);
+  return gb >= 1 ? `${gb.toFixed(1)} GB` : `${(bytes / (1024 * 1024)).toFixed(0)} MB`;
+}
+
+function formatDate(iso: string) {
+  if (!iso) return "—";
+  return new Date(iso).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+}
+
+/* =========================================================================
+ * Sub-components
+ * ========================================================================= */
+
+function ExplainerBanner() {
   return (
-    <div className="my-4">
-      <div className="flex items-center justify-between mb-1.5">
-        <span className="text-sm font-medium text-gray-700">{label}</span>
+    <div className="bg-white border border-gray-200 rounded-lg p-4">
+      <div className="flex items-start gap-3">
+        <div className="w-8 h-8 rounded-lg bg-blue-50 text-blue-600 flex items-center justify-center shrink-0">
+          <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+        </div>
+        <div className="flex-1 text-sm">
+          <p className="font-semibold text-gray-900">Three things you can do here</p>
+          <ul className="mt-1.5 space-y-1 text-gray-600 text-xs">
+            <li>
+              <strong className="text-gray-800">Save as swap</strong> — exports a Cloud PC&apos;s current state to
+              storage (20–60 min).
+            </li>
+            <li>
+              <strong className="text-gray-800">Replace from swap</strong> — provisions a new Cloud PC from a
+              saved swap, then removes the old one once the new is ready.
+            </li>
+            <li>
+              <strong className="text-gray-800">Provision new from swap</strong> — creates an additional Cloud
+              PC from a saved swap without touching existing ones.
+            </li>
+          </ul>
+        </div>
       </div>
-      <div className="w-full bg-gray-200 rounded-full h-2 overflow-hidden">
-        <div
-          className="bg-blue-600 h-2 rounded-full animate-progress"
-          style={{ width: "30%" }}
-        />
-      </div>
-      <style jsx>{`
-        @keyframes progress {
-          0% { transform: translateX(-100%); }
-          50% { transform: translateX(250%); }
-          100% { transform: translateX(-100%); }
-        }
-        .animate-progress {
-          animation: progress 2s ease-in-out infinite;
-        }
-      `}</style>
     </div>
   );
 }
 
-/* ─── Save Swap Dialog ─── */
-function SaveSwapDialog({
-  cloudPC,
-  saving,
-  result,
-  errorMessage,
-  onSave,
-  onClose,
+function SectionHeader({
+  title,
+  subtitle,
+  onRefresh,
 }: {
-  cloudPC: any;
-  saving: boolean;
-  result: "success" | "error" | null;
-  errorMessage: string | null;
-  onSave: (name: string, tier: "hot" | "cool" | "cold" | "archive") => void;
+  title: string;
+  subtitle: string;
+  onRefresh?: () => void;
+}) {
+  return (
+    <div className="flex items-end justify-between mb-3">
+      <div>
+        <h2 className="text-lg font-semibold text-gray-900">{title}</h2>
+        <p className="text-xs text-gray-500 mt-0.5">{subtitle}</p>
+      </div>
+      {onRefresh && (
+        <button
+          onClick={onRefresh}
+          className="text-xs bg-white border border-gray-300 px-3 py-1.5 rounded-md hover:bg-gray-50"
+        >
+          Refresh
+        </button>
+      )}
+    </div>
+  );
+}
+
+function EmptyCard({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="bg-white rounded-lg border border-gray-200 border-dashed p-8 text-center text-gray-500 text-sm">
+      {children}
+    </div>
+  );
+}
+
+function StatusBadge({ status }: { status: string }) {
+  const running = ["provisioned", "running"].includes(status);
+  const deleting = ["deprovisioning", "failed", "notProvisioned"].includes(status);
+  const bg = running
+    ? "bg-green-50 text-green-700"
+    : deleting
+      ? "bg-red-50 text-red-700"
+      : "bg-gray-100 text-gray-600";
+  const dot = running ? "bg-green-500" : deleting ? "bg-red-500" : "bg-gray-400";
+  return (
+    <span className={`inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full ${bg}`}>
+      <span className={`w-1.5 h-1.5 rounded-full ${dot}`} />
+      {status}
+    </span>
+  );
+}
+
+function CloudPcCard({
+  cpc,
+  busy,
+  hasSwaps,
+  inFlightReplacement,
+  onSave,
+  onReplace,
+  onDelete,
+}: {
+  cpc: any;
+  busy: boolean;
+  hasSwaps: boolean;
+  inFlightReplacement?: PendingReplacement;
+  onSave: () => void;
+  onReplace: () => void;
+  onDelete: () => void;
+}) {
+  return (
+    <div className="bg-white rounded-lg border border-gray-200 p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="font-medium text-gray-900 truncate">{cpc.displayName}</div>
+          <div className="flex items-center gap-2 mt-1 flex-wrap">
+            <StatusBadge status={cpc.status} />
+            {cpc.servicePlanName && <span className="text-xs text-gray-400">{cpc.servicePlanName}</span>}
+          </div>
+        </div>
+      </div>
+
+      {inFlightReplacement && (
+        <div className="mt-3 p-2.5 rounded-md bg-blue-50 border border-blue-200 flex items-center gap-2 text-xs text-blue-800">
+          <span className="inline-block w-3 h-3 border-2 border-blue-600 border-t-transparent rounded-full animate-spin" />
+          Replacement in progress from swap <strong>{inFlightReplacement.swapFriendlyName}</strong>
+        </div>
+      )}
+
+      <div className="flex items-center gap-2 mt-3">
+        <button
+          onClick={onSave}
+          disabled={busy}
+          className="flex-1 bg-blue-600 text-white text-sm px-3 py-2 rounded-lg hover:bg-blue-700 disabled:opacity-50"
+        >
+          {busy ? "Working…" : "Save as swap"}
+        </button>
+        <button
+          onClick={onReplace}
+          disabled={busy || !hasSwaps || !!inFlightReplacement}
+          title={!hasSwaps ? "No saved swaps yet" : inFlightReplacement ? "Replacement already in progress" : ""}
+          className="flex-1 bg-white border border-gray-300 text-gray-800 text-sm px-3 py-2 rounded-lg hover:bg-gray-50 disabled:opacity-50"
+        >
+          Replace from swap
+        </button>
+        <button
+          onClick={onDelete}
+          disabled={busy}
+          title="Remove this Cloud PC"
+          className="px-2.5 py-2 text-gray-400 hover:text-red-600 rounded-lg border border-gray-200 hover:border-red-200 hover:bg-red-50"
+        >
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6M1 7h22M8 7V4a2 2 0 012-2h4a2 2 0 012 2v3" />
+          </svg>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function PendingSwapRow({ pending, onDismiss }: { pending: PendingSwap; onDismiss: () => void }) {
+  return (
+    <tr className="border-b border-gray-100 last:border-0 bg-blue-50/40">
+      <td className="px-4 py-3 font-medium text-gray-900">
+        <div className="flex items-center gap-2">
+          <span className="inline-block w-3 h-3 border-2 border-blue-600 border-t-transparent rounded-full animate-spin" />
+          {pending.projectName}
+        </div>
+        <div className="text-xs text-gray-400 font-normal truncate max-w-xs">
+          Exporting from {pending.cloudPcName}
+        </div>
+      </td>
+      <td className="px-4 py-3 text-gray-500 italic">—</td>
+      <td className="px-4 py-3 text-gray-600">{formatDate(pending.startedAt)}</td>
+      <td className="px-4 py-3">
+        <span className="text-xs px-2 py-0.5 rounded-full bg-blue-100 text-blue-700">Exporting</span>
+      </td>
+      <td className="px-4 py-3 text-right">
+        <span className="text-xs text-gray-500">typically 20–60 min</span>
+        <button
+          onClick={onDismiss}
+          className="ml-3 text-xs text-gray-400 hover:text-gray-600 underline"
+          title="Dismiss this indicator (does not cancel the export)"
+        >
+          Dismiss
+        </button>
+      </td>
+    </tr>
+  );
+}
+
+function SwapRow({
+  swap,
+  cloudPCs,
+  busy,
+  onProvision,
+}: {
+  swap: any;
+  cloudPCs: any[];
+  busy: boolean;
+  onProvision: () => void;
+}) {
+  return (
+    <tr className="border-b border-gray-100 last:border-0 hover:bg-gray-50">
+      <td className="px-4 py-3 font-medium text-gray-900">
+        {friendlyName(swap.name, cloudPCs)}
+        <div className="text-xs text-gray-400 font-normal truncate max-w-xs">{swap.name}</div>
+      </td>
+      <td className="px-4 py-3 text-gray-600">{formatSize(swap.size)}</td>
+      <td className="px-4 py-3 text-gray-600">{formatDate(swap.createdOn)}</td>
+      <td className="px-4 py-3">
+        <span className="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-600">{swap.accessTier || "—"}</span>
+      </td>
+      <td className="px-4 py-3 text-right">
+        <button
+          onClick={onProvision}
+          disabled={busy}
+          className="bg-green-600 text-white text-sm px-3 py-1.5 rounded-lg hover:bg-green-700 disabled:opacity-50"
+        >
+          {busy ? "Working…" : "Provision new Cloud PC"}
+        </button>
+      </td>
+    </tr>
+  );
+}
+
+/* =========================================================================
+ * Dialogs
+ * ========================================================================= */
+
+function DialogShell({
+  title,
+  subtitle,
+  onClose,
+  disabled,
+  children,
+}: {
+  title: string;
+  subtitle?: string;
   onClose: () => void;
+  disabled?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <>
+      <div className="fixed inset-0 bg-black/30 z-30" onClick={disabled ? undefined : onClose} />
+      <div className="fixed inset-0 flex items-center justify-center z-40 px-4">
+        <div className="bg-white rounded-xl shadow-xl max-w-md w-full p-6">
+          <h3 className="text-lg font-semibold text-gray-900">{title}</h3>
+          {subtitle && <p className="text-sm text-gray-500 mt-0.5">{subtitle}</p>}
+          <div className="mt-4">{children}</div>
+        </div>
+      </div>
+    </>
+  );
+}
+
+function SaveSwapDialog({
+  cpc,
+  busy,
+  onCancel,
+  onConfirm,
+}: {
+  cpc: any;
+  busy: boolean;
+  onCancel: () => void;
+  onConfirm: (name: string, tier: "hot" | "cool" | "cold" | "archive") => void;
 }) {
   const [name, setName] = useState("");
-  // Default to 'hot' — mirrors the Intune "Create Restore Point" manual flow
-  // and gives the fastest rehydrate when loading the swap back later. Users
-  // who want cheaper storage can still pick cool/cold/archive.
   const [tier, setTier] = useState<"hot" | "cool" | "cold" | "archive">("hot");
 
   return (
-    <>
-      <div className="fixed inset-0 bg-black/30 z-30" onClick={!saving ? onClose : undefined} />
-      <div className="fixed inset-0 flex items-center justify-center z-40 px-4">
-        <div className="bg-white rounded-xl shadow-xl max-w-md w-full p-6">
-          <h3 className="text-lg font-semibold text-gray-900 mb-1">Save Swap</h3>
+    <DialogShell
+      title="Save as swap"
+      subtitle={`Export ${cpc.displayName} to blob storage as a persistent VHD.`}
+      onClose={onCancel}
+      disabled={busy}
+    >
+      <label className="block text-sm font-medium text-gray-700 mb-1">Swap label</label>
+      <input
+        type="text"
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        placeholder="e.g. project-alpha-sprint-3"
+        className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+        autoFocus
+        disabled={busy}
+      />
+      <p className="text-xs text-gray-400 mt-1">
+        A label for your records. Windows 365 names the blob itself.
+      </p>
 
-          {result === "success" ? (
-            <>
-              <div className="flex items-center gap-3 my-4 p-3 bg-green-50 border border-green-200 rounded-lg">
-                <svg className="w-6 h-6 text-green-600 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                </svg>
-                <div>
-                  <p className="text-sm font-medium text-green-800">Export initiated</p>
-                  <p className="text-xs text-green-700 mt-0.5">
-                    Your Cloud PC environment is being exported to storage. This typically takes 20-60 minutes.
-                    The swap will appear in the Saved Swaps list once complete.
-                  </p>
-                </div>
-              </div>
-              <div className="flex justify-end">
-                <button
-                  onClick={onClose}
-                  className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700"
-                >
-                  Done
-                </button>
-              </div>
-            </>
-          ) : result === "error" ? (
-            <>
-              <div className="flex items-center gap-3 my-4 p-3 bg-red-50 border border-red-200 rounded-lg">
-                <svg className="w-6 h-6 text-red-600 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                </svg>
-                <div>
-                  <p className="text-sm font-medium text-red-800">Failed to save swap</p>
-                  <p className="text-xs text-red-700 mt-0.5">{errorMessage}</p>
-                </div>
-              </div>
-              <div className="flex justify-end gap-2">
-                <button
-                  onClick={onClose}
-                  className="px-4 py-2 text-sm text-gray-700 border border-gray-300 rounded-lg hover:bg-gray-50"
-                >
-                  Close
-                </button>
-              </div>
-            </>
-          ) : saving ? (
-            <>
-              <p className="text-sm text-gray-500">
-                Submitting export request for <strong>{cloudPC.displayName}</strong>...
-              </p>
-              <ProgressBar label="Initiating export..." />
-              <p className="text-xs text-gray-400">Please wait while the request is submitted to Azure.</p>
-            </>
-          ) : (
-            <>
-              <p className="text-sm text-gray-500 mb-4">
-                Export <strong>{cloudPC.displayName}</strong> to blob storage as a persistent VHD. This
-                preserves the entire environment even after Cloud PC lifecycle events.
-              </p>
+      <label className="block text-sm font-medium text-gray-700 mt-4 mb-1">Storage tier</label>
+      <select
+        value={tier}
+        onChange={(e) => setTier(e.target.value as typeof tier)}
+        disabled={busy}
+        className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none bg-white"
+      >
+        <option value="hot">Hot — fastest load, highest cost</option>
+        <option value="cool">Cool — cheaper, slight rehydrate delay</option>
+        <option value="cold">Cold — cheapest online tier</option>
+        <option value="archive">Archive — cheapest, hours to rehydrate</option>
+      </select>
+      <p className="text-xs text-gray-400 mt-1">Typically takes 20–60 min to complete.</p>
 
-              <label className="block text-sm font-medium text-gray-700 mb-1">Swap name</label>
-              <input
-                type="text"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder="e.g. project-alpha-sprint-3"
-                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
-                autoFocus
-              />
-              <p className="text-xs text-gray-400 mt-1">
-                A label for your records. The actual blob is named by Windows 365.
-                Typically takes 20&ndash;60 min to complete.
-              </p>
-
-              <label className="block text-sm font-medium text-gray-700 mt-4 mb-1">
-                Storage tier
-              </label>
-              <select
-                value={tier}
-                onChange={(e) => setTier(e.target.value as typeof tier)}
-                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none bg-white"
-              >
-                <option value="hot">Hot &mdash; fastest load, highest storage cost</option>
-                <option value="cool">Cool &mdash; cheaper, slight rehydrate delay</option>
-                <option value="cold">Cold &mdash; even cheaper, longer rehydrate</option>
-                <option value="archive">Archive &mdash; cheapest, hours to rehydrate</option>
-              </select>
-              <p className="text-xs text-gray-400 mt-1">
-                Matches the access tier you choose manually in Intune &rarr;
-                Restore Points &rarr; Create Restore Point.
-              </p>
-
-              <div className="flex justify-end gap-2 mt-6">
-                <button
-                  onClick={onClose}
-                  className="px-4 py-2 text-sm text-gray-700 border border-gray-300 rounded-lg hover:bg-gray-50"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={() => onSave(name, tier)}
-                  disabled={!name.trim()}
-                  className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
-                >
-                  Save Swap
-                </button>
-              </div>
-            </>
-          )}
-        </div>
+      <div className="flex justify-end gap-2 mt-6">
+        <button
+          onClick={onCancel}
+          disabled={busy}
+          className="px-4 py-2 text-sm text-gray-700 border border-gray-300 rounded-lg hover:bg-gray-50"
+        >
+          Cancel
+        </button>
+        <button
+          onClick={() => onConfirm(name.trim(), tier)}
+          disabled={!name.trim() || busy}
+          className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
+        >
+          {busy ? "Submitting…" : "Save swap"}
+        </button>
       </div>
-    </>
+    </DialogShell>
   );
 }
 
-/* ─── Load Swap Dialog ─── */
-function LoadSwapDialog({
+function ProvisionDialog({
   swap,
-  loading,
-  result,
-  errorMessage,
-  onLoad,
-  onClose,
+  cloudPCs,
+  busy,
+  onCancel,
+  onConfirm,
 }: {
   swap: any;
-  loading: boolean;
-  result: "success" | "error" | null;
-  errorMessage: string | null;
-  onLoad: () => void;
-  onClose: () => void;
+  cloudPCs: any[];
+  busy: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
 }) {
-  const friendlyName = swap.name.replace(/^.*\//, "").replace(/\.(vhdx?|vmgs)$/i, "");
+  const name = friendlyName(swap.name, cloudPCs);
+  return (
+    <DialogShell
+      title="Provision new Cloud PC from swap"
+      subtitle={`Creates a new Cloud PC from "${name}" without touching existing ones.`}
+      onClose={onCancel}
+      disabled={busy}
+    >
+      <div className="bg-amber-50 border border-amber-200 rounded-md p-3 text-xs text-amber-800">
+        A <strong>new</strong> Cloud PC will be provisioned and assigned to you. Your existing Cloud PCs are
+        unaffected. Provisioning typically takes 15–45 min.
+      </div>
+      <div className="flex justify-end gap-2 mt-6">
+        <button
+          onClick={onCancel}
+          disabled={busy}
+          className="px-4 py-2 text-sm text-gray-700 border border-gray-300 rounded-lg hover:bg-gray-50"
+        >
+          Cancel
+        </button>
+        <button
+          onClick={onConfirm}
+          disabled={busy}
+          className="px-4 py-2 text-sm bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50"
+        >
+          {busy ? "Submitting…" : "Provision new Cloud PC"}
+        </button>
+      </div>
+    </DialogShell>
+  );
+}
+
+function ReplaceDialog({
+  cpc,
+  swaps,
+  cloudPCs,
+  busy,
+  onCancel,
+  onConfirm,
+}: {
+  cpc: any;
+  swaps: any[];
+  cloudPCs: any[];
+  busy: boolean;
+  onCancel: () => void;
+  onConfirm: (swap: any) => void;
+}) {
+  const sorted = useMemo(
+    () => [...swaps].sort((a, b) => new Date(b.createdOn).getTime() - new Date(a.createdOn).getTime()),
+    [swaps],
+  );
+  const [selected, setSelected] = useState<any | null>(sorted[0] ?? null);
 
   return (
-    <>
-      <div className="fixed inset-0 bg-black/30 z-30" onClick={!loading ? onClose : undefined} />
-      <div className="fixed inset-0 flex items-center justify-center z-40 px-4">
-        <div className="bg-white rounded-xl shadow-xl max-w-md w-full p-6">
-          <h3 className="text-lg font-semibold text-gray-900 mb-1">Load Swap</h3>
+    <DialogShell
+      title={`Replace ${cpc.displayName} from swap`}
+      onClose={onCancel}
+      disabled={busy}
+    >
+      <p className="text-sm text-gray-600 mb-3">
+        Windows 365 can&apos;t swap disks on an existing Cloud PC, so this workflow:
+      </p>
+      <ol className="list-decimal list-inside text-xs text-gray-600 space-y-1 mb-4">
+        <li>Provisions a <strong>new</strong> Cloud PC from the selected swap (15–45 min).</li>
+        <li>Once it&apos;s ready, you confirm removal of the old one.</li>
+      </ol>
 
-          {result === "success" ? (
-            <>
-              <div className="flex items-center gap-3 my-4 p-3 bg-green-50 border border-green-200 rounded-lg">
-                <svg className="w-6 h-6 text-green-600 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                </svg>
-                <div>
-                  <p className="text-sm font-medium text-green-800">Provisioning started</p>
-                  <p className="text-xs text-green-700 mt-0.5">
-                    A new Cloud PC is being provisioned from <strong>{friendlyName}</strong>.
-                    This typically takes 15-45 minutes. It will appear in Your Cloud PCs once ready.
-                  </p>
-                </div>
+      <label className="block text-sm font-medium text-gray-700 mb-1">Choose swap</label>
+      <div className="max-h-64 overflow-auto border border-gray-200 rounded-md divide-y">
+        {sorted.length === 0 && (
+          <div className="p-3 text-sm text-gray-500">No saved swaps available.</div>
+        )}
+        {sorted.map((s) => (
+          <label
+            key={s.name}
+            className={`flex items-start gap-2 p-3 text-sm cursor-pointer hover:bg-gray-50 ${
+              selected?.name === s.name ? "bg-blue-50" : ""
+            }`}
+          >
+            <input
+              type="radio"
+              name="swap"
+              checked={selected?.name === s.name}
+              onChange={() => setSelected(s)}
+              className="mt-0.5"
+              disabled={busy}
+            />
+            <div className="flex-1 min-w-0">
+              <div className="font-medium text-gray-900 truncate">{friendlyName(s.name, cloudPCs)}</div>
+              <div className="text-xs text-gray-500 mt-0.5">
+                {formatSize(s.size)} · {formatDate(s.createdOn)} · {s.accessTier || "—"}
               </div>
-              <div className="flex justify-end">
-                <button
-                  onClick={onClose}
-                  className="px-4 py-2 text-sm bg-green-600 text-white rounded-lg hover:bg-green-700"
-                >
-                  Done
-                </button>
-              </div>
-            </>
-          ) : result === "error" ? (
-            <>
-              <div className="flex items-center gap-3 my-4 p-3 bg-red-50 border border-red-200 rounded-lg">
-                <svg className="w-6 h-6 text-red-600 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                </svg>
-                <div>
-                  <p className="text-sm font-medium text-red-800">Failed to load swap</p>
-                  <p className="text-xs text-red-700 mt-0.5">{errorMessage}</p>
-                </div>
-              </div>
-              <div className="flex justify-end gap-2">
-                <button
-                  onClick={onClose}
-                  className="px-4 py-2 text-sm text-gray-700 border border-gray-300 rounded-lg hover:bg-gray-50"
-                >
-                  Close
-                </button>
-              </div>
-            </>
-          ) : loading ? (
-            <>
-              <p className="text-sm text-gray-500">
-                Submitting import request for <strong>{friendlyName}</strong>...
-              </p>
-              <ProgressBar label="Initiating provisioning..." />
-              <p className="text-xs text-gray-400">Please wait while the request is submitted to Azure.</p>
-            </>
-          ) : (
-            <>
-              <p className="text-sm text-gray-500 mb-4">
-                Provision a new Cloud PC from <strong>{friendlyName}</strong>. This will create a
-                fresh Cloud PC with the exact state from when the swap was saved.
-              </p>
-
-              <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-xs text-amber-800 mb-4">
-                <strong>Note:</strong> This creates a <em>new</em> Cloud PC &mdash; it does not replace
-                your existing one. The new Cloud PC will appear in your list once provisioning completes
-                (15-45 minutes). Your existing Cloud PCs are not affected.
-              </div>
-
-              <div className="flex justify-end gap-2">
-                <button
-                  onClick={onClose}
-                  className="px-4 py-2 text-sm text-gray-700 border border-gray-300 rounded-lg hover:bg-gray-50"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={onLoad}
-                  className="px-4 py-2 text-sm bg-green-600 text-white rounded-lg hover:bg-green-700"
-                >
-                  Load Swap
-                </button>
-              </div>
-            </>
-          )}
-        </div>
+            </div>
+          </label>
+        ))}
       </div>
-    </>
+
+      <div className="mt-4 bg-amber-50 border border-amber-200 rounded-md p-3 text-xs text-amber-800">
+        <strong>Heads up:</strong> until you confirm removal, you&apos;ll temporarily have two Cloud PCs — the
+        existing one and the new replacement. Both count against your licence/quota.
+      </div>
+
+      <div className="flex justify-end gap-2 mt-6">
+        <button
+          onClick={onCancel}
+          disabled={busy}
+          className="px-4 py-2 text-sm text-gray-700 border border-gray-300 rounded-lg hover:bg-gray-50"
+        >
+          Cancel
+        </button>
+        <button
+          onClick={() => selected && onConfirm(selected)}
+          disabled={!selected || busy}
+          className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
+        >
+          {busy ? "Submitting…" : "Start replacement"}
+        </button>
+      </div>
+    </DialogShell>
+  );
+}
+
+function DeleteConfirmDialog({
+  cpc,
+  isReplacement,
+  busy,
+  onCancel,
+  onConfirm,
+}: {
+  cpc: any;
+  isReplacement: boolean;
+  busy: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <DialogShell title={`Remove ${cpc.displayName}?`} onClose={onCancel} disabled={busy}>
+      <div className="bg-red-50 border border-red-200 rounded-md p-3 text-xs text-red-800">
+        {isReplacement ? (
+          <>
+            The replacement Cloud PC is ready. Removing <strong>{cpc.displayName}</strong> starts Intune&apos;s
+            grace-period workflow — the device will be decommissioned shortly.
+          </>
+        ) : (
+          <>
+            Removing <strong>{cpc.displayName}</strong> starts Intune&apos;s grace-period workflow. Any local
+            changes not captured in a swap will be lost.
+          </>
+        )}
+      </div>
+      <div className="flex justify-end gap-2 mt-6">
+        <button
+          onClick={onCancel}
+          disabled={busy}
+          className="px-4 py-2 text-sm text-gray-700 border border-gray-300 rounded-lg hover:bg-gray-50"
+        >
+          Cancel
+        </button>
+        <button
+          onClick={onConfirm}
+          disabled={busy}
+          className="px-4 py-2 text-sm bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50"
+        >
+          {busy ? "Removing…" : "Remove Cloud PC"}
+        </button>
+      </div>
+    </DialogShell>
+  );
+}
+
+function Toast({
+  kind,
+  msg,
+  onClose,
+}: {
+  kind: "success" | "error" | "info";
+  msg: string;
+  onClose: () => void;
+}) {
+  const styles = {
+    success: "bg-emerald-600 text-white",
+    error: "bg-red-600 text-white",
+    info: "bg-gray-900 text-white",
+  }[kind];
+  return (
+    <div className="fixed bottom-6 right-6 z-50 max-w-sm">
+      <div className={`${styles} rounded-lg shadow-lg px-4 py-3 text-sm flex items-start gap-3`}>
+        <span className="flex-1">{msg}</span>
+        <button onClick={onClose} className="opacity-80 hover:opacity-100">
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+          </svg>
+        </button>
+      </div>
+    </div>
   );
 }
