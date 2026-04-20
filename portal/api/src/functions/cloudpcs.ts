@@ -4,10 +4,12 @@ import { isValidGuid, sanitizeErrorMessage } from "../lib/validation.js";
 
 /**
  * GET /api/cloudpcs
- * Lists Cloud PCs for the authenticated user, or all if admin and ?all=true.
- * 
+ * Lists Cloud PCs assigned to the authenticated user.
+ *
+ * Uses Graph `/me/cloudPCs` so callers only ever see their own devices,
+ * regardless of whether their token has tenant-wide Cloud PC permissions.
+ *
  * Query params:
- *   - all=true: list all Cloud PCs (requires admin)
  *   - includeSnapshots=true: also retrieve snapshots per CPC
  */
 async function getCloudPCs(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
@@ -20,9 +22,9 @@ async function getCloudPCs(request: HttpRequest, context: InvocationContext): Pr
     const client = createOboGraphClient(token);
     const includeSnapshots = request.query.get("includeSnapshots") === "true";
 
-    // Get Cloud PCs
+    // Only the caller's own Cloud PCs — never the whole tenant.
     const response = await client
-      .api("/deviceManagement/virtualEndpoint/cloudPCs")
+      .api("/me/cloudPCs")
       .version("beta")
       .get();
 
