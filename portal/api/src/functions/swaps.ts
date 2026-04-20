@@ -16,6 +16,11 @@ const W365_CONTAINER_PREFIX = "windows365-share-";
 // values are ASCII only, so we store a base64(UTF-8) payload.
 const DISPLAY_NAME_META_KEY = "displayname_b64";
 
+// Blob metadata key for the owning user's Entra object id (oid). Stamped when
+// a caller first claims a legacy (unclaimed) swap, or on save/rename/delete.
+// Lowercase GUID; fits in ASCII so no encoding is needed.
+const OWNER_OID_META_KEY = "owner_oid";
+
 function getStorageAccountName(): string {
   const id = process.env.STORAGE_ACCOUNT_ID || "";
   const match = id.match(/storageAccounts\/([^/]+)/i);
@@ -56,6 +61,26 @@ function extractCpcIdFromBlobName(blobName: string): string | null {
   return match ? match[1].toLowerCase() : null;
 }
 
+/**
+ * Extracts the caller's Entra object id (`oid`) from the JWT in the
+ * Authorization header. Falls back to `sub` if `oid` is absent. This is only
+ * used to tag blob ownership metadata - scoping decisions never trust it in
+ * isolation (Graph calls via OBO remain the authoritative source).
+ */
+function getCallerOid(token: string): string | null {
+  const parts = token.split(".");
+  if (parts.length < 2) return null;
+  try {
+    const payload = JSON.parse(
+      Buffer.from(parts[1].replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8"),
+    );
+    const oid = typeof payload.oid === "string" ? payload.oid : payload.sub;
+    return typeof oid === "string" ? oid.toLowerCase() : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Returns the companion blob name (.vmgs alongside .vhdx, or vice-versa). */
 function companionBlobName(blobName: string): string | null {
   if (/\.vhdx?$/i.test(blobName)) {
@@ -94,15 +119,23 @@ async function getCallerCpcIds(token: string): Promise<Set<string>> {
 
 /**
  * GET /api/swaps
- * Lists the caller's saved swaps. Swaps are scoped to Cloud PCs currently
- * assigned to the signed-in user (matched on the `CPC_<id>_` blob name
- * prefix). Each entry includes the user-supplied displayName if present.
+ * Lists the caller's saved swaps. A swap is "the caller's" when:
+ *   - its `owner_oid` metadata equals the caller's oid, OR
+ *   - it has no `owner_oid` set (legacy / unclaimed) AND either matches one
+ *     of the caller's currently-assigned Cloud PCs by id prefix, or has no
+ *     parseable CPC id at all.
+ *
+ * When a caller reads a legacy blob that maps to one of their CPCs, we stamp
+ * their oid as owner so future reads are unambiguous (best-effort; errors
+ * are logged and ignored).
  */
 async function listSwaps(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const token = extractBearerToken(request.headers.get("authorization") ?? undefined);
   if (!token) {
     return { status: 401, jsonBody: { error: "Missing or invalid authorization header" } };
   }
+
+  const callerOid = getCallerOid(token);
 
   try {
     const callerCpcIds = await getCallerCpcIds(token);
@@ -126,15 +159,30 @@ async function listSwaps(request: HttpRequest, context: InvocationContext): Prom
       for await (const blob of containerClient.listBlobsFlat({ includeMetadata: true })) {
         if (!/\.vhdx?$/i.test(blob.name)) continue;
 
+        const meta = blob.metadata ?? {};
+        const ownerOid = typeof meta[OWNER_OID_META_KEY] === "string" ? meta[OWNER_OID_META_KEY].toLowerCase() : null;
         const cpcId = extractCpcIdFromBlobName(blob.name);
-        // Scope to caller: only include swaps whose CPC id is assigned to the
-        // caller. Blobs without a parseable CPC id are hidden.
-        if (!cpcId || !callerCpcIds.has(cpcId)) continue;
+        const ownedByCaller = !!(callerOid && ownerOid && ownerOid === callerOid);
+        const legacyMatchesCpc = !ownerOid && (cpcId ? callerCpcIds.has(cpcId) : true);
+
+        if (!ownedByCaller && !legacyMatchesCpc) continue;
+
+        // Lazy claim: if this is a legacy blob that matches the caller's CPC
+        // and we know the caller's oid, stamp ownership so it's stable going
+        // forward. Best-effort; ignore failures.
+        if (!ownerOid && callerOid && legacyMatchesCpc) {
+          try {
+            const blobClient = containerClient.getBlobClient(blob.name);
+            await blobClient.setMetadata({ ...meta, [OWNER_OID_META_KEY]: callerOid });
+          } catch (err) {
+            context.warn(`Failed to stamp owner on ${blob.name}: ${(err as Error).message}`);
+          }
+        }
 
         swaps.push({
           name: blob.name,
           containerName: container.name,
-          displayName: decodeDisplayName(blob.metadata?.[DISPLAY_NAME_META_KEY]),
+          displayName: decodeDisplayName(meta[DISPLAY_NAME_META_KEY]),
           cloudPcId: cpcId,
           size: blob.properties.contentLength || 0,
           createdOn: blob.properties.createdOn?.toISOString() || "",
@@ -158,15 +206,15 @@ async function listSwaps(request: HttpRequest, context: InvocationContext): Prom
 
 /**
  * Validates the URL-path container + blob pair and checks that the blob
- * belongs to one of the caller's Cloud PCs. Returns an error response on
- * failure, or the resolved container client on success.
+ * belongs to the caller. Ownership is resolved in the same way as listSwaps:
+ * owner metadata match, or legacy blob matching one of the caller's CPCs.
  */
 async function resolveCallerOwnedBlob(
   token: string,
   container: string,
   blobName: string,
 ): Promise<
-  | { ok: true; containerClient: ContainerClient; cpcId: string }
+  | { ok: true; containerClient: ContainerClient; cpcId: string | null; ownerOid: string | null }
   | { ok: false; response: HttpResponseInit }
 > {
   if (!isValidContainerName(container) || !isSwapContainer(container)) {
@@ -176,23 +224,39 @@ async function resolveCallerOwnedBlob(
     return { ok: false, response: { status: 400, jsonBody: { error: "Invalid blob name" } } };
   }
 
-  const cpcId = extractCpcIdFromBlobName(blobName);
-  if (!cpcId) {
-    return {
-      ok: false,
-      response: { status: 400, jsonBody: { error: "Blob name does not match the expected CPC_<id>_ pattern" } },
-    };
-  }
+  const blobService = createBlobService();
+  const containerClient = blobService.getContainerClient(container);
+  const blobClient = containerClient.getBlobClient(blobName);
 
-  const callerCpcIds = await getCallerCpcIds(token);
-  if (!callerCpcIds.has(cpcId)) {
-    // Don't leak existence of swaps owned by other users.
+  const props = await blobClient.getProperties().catch((err) => {
+    if (err.statusCode === 404) return null;
+    throw err;
+  });
+  if (!props) {
     return { ok: false, response: { status: 404, jsonBody: { error: "Swap not found" } } };
   }
 
-  const blobService = createBlobService();
-  const containerClient = blobService.getContainerClient(container);
-  return { ok: true, containerClient, cpcId };
+  const meta = props.metadata ?? {};
+  const ownerOid = typeof meta[OWNER_OID_META_KEY] === "string" ? meta[OWNER_OID_META_KEY].toLowerCase() : null;
+  const callerOid = getCallerOid(token);
+  const cpcId = extractCpcIdFromBlobName(blobName);
+
+  if (ownerOid) {
+    if (!callerOid || ownerOid !== callerOid) {
+      return { ok: false, response: { status: 404, jsonBody: { error: "Swap not found" } } };
+    }
+  } else {
+    // Legacy blob: require the embedded CPC id to map to one of the caller's
+    // current CPCs. If there is no CPC id at all, allow (and claim).
+    if (cpcId) {
+      const callerCpcIds = await getCallerCpcIds(token);
+      if (!callerCpcIds.has(cpcId)) {
+        return { ok: false, response: { status: 404, jsonBody: { error: "Swap not found" } } };
+      }
+    }
+  }
+
+  return { ok: true, containerClient, cpcId, ownerOid };
 }
 
 /**
@@ -292,6 +356,12 @@ async function renameSwap(request: HttpRequest, context: InvocationContext): Pro
       merged[DISPLAY_NAME_META_KEY] = encodeDisplayName(displayName);
     }
 
+    // Stamp owner on any write if missing - renames implicitly claim.
+    if (!merged[OWNER_OID_META_KEY]) {
+      const callerOid = getCallerOid(token);
+      if (callerOid) merged[OWNER_OID_META_KEY] = callerOid;
+    }
+
     await blobClient.setMetadata(merged);
 
     return { status: 200, jsonBody: { data: { displayName: displayName || null } } };
@@ -323,4 +393,4 @@ app.http("renameSwap", {
   authLevel: "anonymous",
   route: "swaps/{container}/{*blobName}",
   handler: renameSwap,
-});
+});
