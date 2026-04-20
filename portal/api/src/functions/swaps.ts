@@ -121,13 +121,8 @@ async function getCallerCpcIds(token: string): Promise<Set<string>> {
  * GET /api/swaps
  * Lists the caller's saved swaps. A swap is "the caller's" when:
  *   - its `owner_oid` metadata equals the caller's oid, OR
- *   - it has no `owner_oid` set (legacy / unclaimed) AND either matches one
- *     of the caller's currently-assigned Cloud PCs by id prefix, or has no
- *     parseable CPC id at all.
- *
- * When a caller reads a legacy blob that maps to one of their CPCs, we stamp
- * their oid as owner so future reads are unambiguous (best-effort; errors
- * are logged and ignored).
+ *   - it has no `owner_oid` set (legacy / unclaimed), in which case the
+ *     first authenticated caller to read it is stamped as the owner.
  */
 async function listSwaps(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const token = extractBearerToken(request.headers.get("authorization") ?? undefined);
@@ -138,7 +133,6 @@ async function listSwaps(request: HttpRequest, context: InvocationContext): Prom
   const callerOid = getCallerOid(token);
 
   try {
-    const callerCpcIds = await getCallerCpcIds(token);
     const blobService = createBlobService();
 
     const swaps: Array<{
@@ -163,14 +157,19 @@ async function listSwaps(request: HttpRequest, context: InvocationContext): Prom
         const ownerOid = typeof meta[OWNER_OID_META_KEY] === "string" ? meta[OWNER_OID_META_KEY].toLowerCase() : null;
         const cpcId = extractCpcIdFromBlobName(blob.name);
         const ownedByCaller = !!(callerOid && ownerOid && ownerOid === callerOid);
-        const legacyMatchesCpc = !ownerOid && (cpcId ? callerCpcIds.has(cpcId) : true);
+        // Unclaimed (no owner metadata) blobs are visible to any authenticated
+        // caller and get claimed below on first read. This handles two cases:
+        //  1. Blobs exported before the owner_oid mechanism existed.
+        //  2. Blobs whose originating Cloud PC has been deleted/reassigned
+        //     (the old CPC-id-in-current-assignments rule would hide them).
+        const legacyUnclaimed = !ownerOid;
 
-        if (!ownedByCaller && !legacyMatchesCpc) continue;
+        if (!ownedByCaller && !legacyUnclaimed) continue;
 
-        // Lazy claim: if this is a legacy blob that matches the caller's CPC
-        // and we know the caller's oid, stamp ownership so it's stable going
-        // forward. Best-effort; ignore failures.
-        if (!ownerOid && callerOid && legacyMatchesCpc) {
+        // Lazy claim: stamp the caller as owner so subsequent requests are
+        // unambiguous and the blob is hidden from other users going forward.
+        // Best-effort; errors are logged and ignored.
+        if (legacyUnclaimed && callerOid) {
           try {
             const blobClient = containerClient.getBlobClient(blob.name);
             await blobClient.setMetadata({ ...meta, [OWNER_OID_META_KEY]: callerOid });
@@ -245,16 +244,10 @@ async function resolveCallerOwnedBlob(
     if (!callerOid || ownerOid !== callerOid) {
       return { ok: false, response: { status: 404, jsonBody: { error: "Swap not found" } } };
     }
-  } else {
-    // Legacy blob: require the embedded CPC id to map to one of the caller's
-    // current CPCs. If there is no CPC id at all, allow (and claim).
-    if (cpcId) {
-      const callerCpcIds = await getCallerCpcIds(token);
-      if (!callerCpcIds.has(cpcId)) {
-        return { ok: false, response: { status: 404, jsonBody: { error: "Swap not found" } } };
-      }
-    }
   }
+  // Unclaimed legacy blobs (no owner_oid) are accessible to any authenticated
+  // caller, matching the TOFU rule in listSwaps. Callers who act on them
+  // implicitly claim ownership via the write path (see renameSwap).
 
   return { ok: true, containerClient, cpcId, ownerOid };
 }
