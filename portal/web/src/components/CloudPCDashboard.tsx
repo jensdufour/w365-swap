@@ -914,6 +914,13 @@ function ProvisionDialog({
         A <strong>new</strong> Cloud PC will be provisioned in addition to your existing ones and assigned
         to you. It consumes one Windows 365 license. Provisioning typically takes 15–45 min.
       </div>
+      <div className="mt-3 text-xs text-gray-500">
+        <strong>Heads up:</strong> Windows 365&apos;s <code>importSnapshot</code> requires a complete disk
+        image (Gen1 <code>.vhd</code>, or Gen2 <code>.vhdx</code> + <code>.vmgs</code> pair). Swaps
+        exported by the <em>Save</em> action in this app contain only the data VHD, so Gen2 snapshots
+        will fail here with <em>invalidStorageInformation</em>. Use <em>Restore</em> on the original
+        Cloud PC for in-place rollbacks.
+      </div>
       <div className="flex justify-end gap-2 mt-6">
         <button
           onClick={onCancel}

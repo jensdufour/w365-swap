@@ -178,9 +178,29 @@ async function importEnvironment(request: HttpRequest, context: InvocationContex
       "body=", typeof error?.body === "string" ? error.body : JSON.stringify(error?.body ?? {}),
       error,
     );
-    // Surface the Graph error code/message so the user can see why it failed
-    // instead of a generic 400. Graph errors from @microsoft/microsoft-graph-
-    // client expose .code and .message; fall back to sanitised Error.message.
+
+    // Specific guidance for the common "invalidStorageInformation" case. This
+    // happens when Graph can't provision from the supplied blob(s) - typically
+    // because the caller's saved swap is a Gen2 Cloud PC export (the default)
+    // whose .vmgs guest-state companion file isn't present alongside the .vhd.
+    // Windows 365's createSnapshot writes only the data VHD to customer
+    // storage, so self-exported Gen2 swaps can't be round-tripped through
+    // importSnapshot. We surface that up-front.
+    if (error?.code === "invalidStorageInformation" && !guestStateBlobName) {
+      return {
+        status: 400,
+        jsonBody: {
+          error:
+            "Graph rejected the VHD as incomplete (invalidStorageInformation). " +
+            "This swap does not have a virtualMachineGuestState (.vmgs) file " +
+            "alongside the .vhd. Windows 365 requires both to provision a new " +
+            "Cloud PC from a Gen2 snapshot, but createSnapshot only exports " +
+            "the data VHD. Use 'Restore' on the original Cloud PC instead, or " +
+            "upload a complete Gen1 VHD (or Gen2 .vhdx + .vmgs pair) you own.",
+        },
+      };
+    }
+
     const detail =
       (typeof error?.code === "string" && typeof error?.message === "string" && `${error.code}: ${error.message}`) ||
       sanitizeErrorMessage(error);
