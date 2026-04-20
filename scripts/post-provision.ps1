@@ -105,6 +105,66 @@ if ($funcApp -and $funcApp.principalId) {
 }
 
 # ---------------------------------------------------------------------------
+# 2b. Assign RBAC to Windows 365 service principal on snapshots storage
+# ---------------------------------------------------------------------------
+# Required so the Cloud PC service can WRITE exported VHDs to customer storage.
+# Without these roles, POST /createSnapshot returns 204 but the export silently
+# fails and no blob ever appears in the snapshots container.
+#
+# Windows 365 first-party app ID: 0af06dc6-e4b5-4f28-818e-e78e62d137a5
+
+Write-Host "Assigning RBAC to Windows 365 service principal on snapshots storage..." -ForegroundColor Cyan
+
+$w365AppId = '0af06dc6-e4b5-4f28-818e-e78e62d137a5'
+
+# Ensure the SP exists in this tenant (first-party apps may not be materialized)
+$w365Sp = az ad sp show --id $w365AppId --output json 2>$null | ConvertFrom-Json
+if (-not $w365Sp) {
+    Write-Host "Windows 365 SP not present in tenant — creating..." -ForegroundColor Yellow
+    az ad sp create --id $w365AppId --output none 2>$null
+    Start-Sleep -Seconds 5
+    $w365Sp = az ad sp show --id $w365AppId --output json 2>$null | ConvertFrom-Json
+}
+
+if ($w365Sp -and $w365Sp.id) {
+    $w365ObjectId = $w365Sp.id
+
+    # Windows 365 needs both Storage Account Contributor (for management operations
+    # like tier / lease) AND Storage Blob Data Contributor (for blob I/O).
+    $roles = @{
+        'Storage Account Contributor'    = '17d1049b-9a84-46fb-8f53-869881c3d3ab'
+        'Storage Blob Data Contributor'  = 'ba92f5b4-2d11-453d-a403-e96b0029c9fe'
+    }
+
+    foreach ($roleName in $roles.Keys) {
+        $roleDef = $roles[$roleName]
+        $existing = az role assignment list `
+            --assignee $w365ObjectId `
+            --role $roleDef `
+            --scope $storageId `
+            --query "[0]" 2>$null | ConvertFrom-Json
+
+        if (-not $existing) {
+            az role assignment create `
+                --assignee-object-id $w365ObjectId `
+                --assignee-principal-type ServicePrincipal `
+                --role $roleDef `
+                --scope $storageId `
+                --output none
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "  RBAC assigned: $roleName -> Windows 365" -ForegroundColor Green
+            } else {
+                Write-Warning "  Failed to assign '$roleName' to Windows 365 SP — assign manually."
+            }
+        } else {
+            Write-Host "  Already assigned: $roleName" -ForegroundColor Green
+        }
+    }
+} else {
+    Write-Warning "Could not resolve Windows 365 service principal — Save Swap exports will fail. Assign 'Storage Account Contributor' and 'Storage Blob Data Contributor' to app $w365AppId on the snapshots storage account manually."
+}
+
+# ---------------------------------------------------------------------------
 # 3. Write portal .env for local development
 # ---------------------------------------------------------------------------
 
