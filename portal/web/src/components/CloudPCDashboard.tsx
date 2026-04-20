@@ -86,6 +86,43 @@ export function CloudPCDashboard() {
   const loadSwaps = useCallback(async () => {
     try {
       const data = await cloudPcApi.listSwaps(instance);
+
+      // Reconcile any pending exports in localStorage against the freshly
+      // loaded swap list: if a pending export's CPC id now appears in a VHD
+      // blob name and that blob has no displayName yet, persist the user-
+      // supplied projectName onto the blob as metadata, then drop the pending
+      // row. Runs inline (not in a useEffect) to avoid closure races.
+      const pendingNow = loadPending();
+      if (pendingNow.length > 0 && Array.isArray(data) && data.length > 0) {
+        const completed: PendingSwap[] = [];
+        for (const p of pendingNow) {
+          const swap = data.find(
+            (s: any) =>
+              typeof s?.name === "string" &&
+              s.name.toLowerCase().includes(p.cloudPcId.toLowerCase()),
+          );
+          if (!swap) continue;
+          completed.push(p);
+          if (!swap.displayName && p.projectName) {
+            try {
+              await cloudPcApi.renameSwap(
+                instance,
+                swap.containerName,
+                swap.name,
+                p.projectName,
+              );
+              swap.displayName = p.projectName; // reflect locally so UI updates immediately
+            } catch (err) {
+              console.warn("Failed to persist pending displayName:", err);
+            }
+          }
+        }
+        if (completed.length > 0) {
+          const doneNames = new Set(completed.map((c) => c.projectName));
+          setPendingSwaps((prev) => prev.filter((p) => !doneNames.has(p.projectName)));
+        }
+      }
+
       setSwaps(data);
     } catch (err: any) {
       console.error("Failed to load swaps:", err);
@@ -102,36 +139,6 @@ export function CloudPCDashboard() {
   }, [loadCloudPCs, loadSwaps]);
 
   useEffect(() => savePending(pendingSwaps), [pendingSwaps]);
-
-  /* When a completed VHD shows up for a pending export, persist the user-
-   * supplied name onto the blob as displayName metadata and drop the pending
-   * row. We only apply the name if the swap doesn't already have one. */
-  useEffect(() => {
-    if (pendingSwaps.length === 0 || swaps.length === 0) return;
-    const matched: Array<{ pending: PendingSwap; swap: any }> = [];
-    for (const p of pendingSwaps) {
-      const swap = swaps.find(
-        (s: any) => typeof s.name === "string" && s.name.toLowerCase().includes(p.cloudPcId.toLowerCase()),
-      );
-      if (swap) matched.push({ pending: p, swap });
-    }
-    if (matched.length === 0) return;
-
-    (async () => {
-      for (const { pending, swap } of matched) {
-        if (!swap.displayName && pending.projectName) {
-          try {
-            await cloudPcApi.renameSwap(instance, swap.containerName, swap.name, pending.projectName);
-          } catch (err) {
-            console.warn("Failed to persist pending displayName:", err);
-          }
-        }
-      }
-      const doneNames = new Set(matched.map((m) => m.pending.projectName));
-      setPendingSwaps((prev) => prev.filter((p) => !doneNames.has(p.projectName)));
-      loadSwaps();
-    })();
-  }, [swaps, pendingSwaps, instance, loadSwaps]);
 
   /* Auto-poll while an export is in flight. */
   useEffect(() => {
