@@ -3,7 +3,7 @@
 import { useMsal } from "@azure/msal-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { cloudPcApi } from "@/lib/api-client";
-
+import { DesiredStatesPanel } from "./DesiredStatesPanel";
 /* =========================================================================
  * Constants & local-storage helpers
  * ========================================================================= */
@@ -375,6 +375,9 @@ export function CloudPCDashboard() {
           </div>
         )}
       </section>
+
+      {/* --- Desired States (mock / vision) --- */}
+      <DesiredStatesPanel />
 
       {/* --- Dialogs --- */}
       {saveDialog && (

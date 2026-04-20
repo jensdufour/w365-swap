@@ -100,6 +100,48 @@ export const cloudPcApi = {
 };
 
 /**
+ * Desired-states API — MOCK/VISION only. Simulates attach/detach of multiple
+ * OS-disk "desired states" against a single Cloud PC compute. Backend stores
+ * state in a per-user JSON blob; no real Cloud PC is touched.
+ */
+export type DesiredState = {
+  id: string;
+  name: string;
+  description: string;
+  sizeGB: number;
+  os: string;
+  status: "attached" | "detached";
+  createdAt: string;
+  lastAttachedAt: string | null;
+};
+
+export const desiredStatesApi = {
+  list: (msal: IPublicClientApplication) =>
+    apiRequest<DesiredState[]>(msal, `/desired-states`),
+
+  create: (msal: IPublicClientApplication, data: { name: string; description?: string; sizeGB?: number; os?: string }) =>
+    apiRequest<DesiredState>(msal, `/desired-states`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
+  attach: (msal: IPublicClientApplication, id: string) =>
+    apiRequest<DesiredState>(msal, `/desired-states/${encodeURIComponent(id)}/attach`, {
+      method: "POST",
+    }),
+
+  detach: (msal: IPublicClientApplication, id: string) =>
+    apiRequest<DesiredState>(msal, `/desired-states/${encodeURIComponent(id)}/detach`, {
+      method: "POST",
+    }),
+
+  remove: (msal: IPublicClientApplication, id: string) =>
+    apiRequest<any>(msal, `/desired-states/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    }),
+};
+
+/**
  * Encodes blob path segments while preserving `/` separators so the server-
  * side `{*blobName}` catch-all parameter receives the path structure intact.
  */
