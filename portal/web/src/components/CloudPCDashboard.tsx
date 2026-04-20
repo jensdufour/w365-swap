@@ -329,26 +329,47 @@ export function CloudPCDashboard() {
                 </tr>
               </thead>
               <tbody>
-                {pendingSwaps.map((p) => (
-                  <PendingSwapRow
-                    key={`pending-${p.projectName}-${p.startedAt}`}
-                    pending={p}
-                    onDismiss={() =>
-                      setPendingSwaps((prev) => prev.filter((x) => x.projectName !== p.projectName))
-                    }
-                  />
-                ))}
-                {swaps.map((swap) => (
-                  <SwapRow
-                    key={swap.name}
-                    swap={swap}
-                    cloudPCs={cloudPCs}
-                    busy={busySwap === swap.name}
-                    onProvision={() => setProvisionDialog({ swap })}
-                    onRename={() => setRenameDialog({ swap })}
-                    onDelete={() => setDeleteDialog({ swap })}
-                  />
-                ))}
+                {pendingSwaps
+                  .filter(
+                    (p) =>
+                      !swaps.some(
+                        (s: any) =>
+                          typeof s?.name === "string" &&
+                          s.name.toLowerCase().includes(p.cloudPcId.toLowerCase()),
+                      ),
+                  )
+                  .map((p) => (
+                    <PendingSwapRow
+                      key={`pending-${p.projectName}-${p.startedAt}`}
+                      pending={p}
+                      onDismiss={() =>
+                        setPendingSwaps((prev) => prev.filter((x) => x.projectName !== p.projectName))
+                      }
+                    />
+                  ))}
+                {swaps.map((swap) => {
+                  // If this blob matches a pending entry and hasn't been
+                  // renamed yet on the server, show the user-supplied name
+                  // locally so the UI is never stuck on the raw CPC_<id> form.
+                  const pending = pendingSwaps.find(
+                    (p) =>
+                      typeof swap?.name === "string" &&
+                      swap.name.toLowerCase().includes(p.cloudPcId.toLowerCase()),
+                  );
+                  const augmented =
+                    !swap.displayName && pending ? { ...swap, displayName: pending.projectName } : swap;
+                  return (
+                    <SwapRow
+                      key={swap.name}
+                      swap={augmented}
+                      cloudPCs={cloudPCs}
+                      busy={busySwap === swap.name}
+                      onProvision={() => setProvisionDialog({ swap: augmented })}
+                      onRename={() => setRenameDialog({ swap: augmented })}
+                      onDelete={() => setDeleteDialog({ swap: augmented })}
+                    />
+                  );
+                })}
               </tbody>
             </table>
           </div>
