@@ -61,13 +61,18 @@ app.http("getCloudPCs", {
 });
 
 /**
- * DELETE /api/cloudpcs/:id
- * Ends the grace period on a Cloud PC (effectively deletes it).
+ * POST /api/cloudpcs/:id/restore
+ * Restores a Cloud PC in place to one of its own W365-retained snapshots.
  *
- * Used by the Replace-from-Swap flow: once a replacement Cloud PC has been
- * provisioned from a swap, the user confirms removal of the old one.
+ * Body:
+ *   - snapshotId: ID of the cloudPcSnapshot to restore to (required)
+ *
+ * This is the "true" load-onto-existing-CPC workflow. It uses only W365's
+ * in-service snapshots (not VHDs in customer storage); the CPC is not
+ * re-provisioned, so the license/assignment/policy binding all persist.
+ * Any local state created after the snapshot will be lost.
  */
-async function deleteCloudPC(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
+async function restoreCloudPC(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const token = extractBearerToken(request.headers.get("authorization") ?? undefined);
   if (!token) {
     return { status: 401, jsonBody: { error: "Missing or invalid authorization header" } };
@@ -78,40 +83,42 @@ async function deleteCloudPC(request: HttpRequest, context: InvocationContext): 
     return { status: 400, jsonBody: { error: "Invalid Cloud PC ID format" } };
   }
 
+  let body: Record<string, unknown>;
+  try {
+    body = (await request.json()) as Record<string, unknown>;
+  } catch {
+    return { status: 400, jsonBody: { error: "Invalid JSON body" } };
+  }
+
+  const snapshotId = typeof body.snapshotId === "string" ? body.snapshotId : undefined;
+  if (!snapshotId) {
+    return { status: 400, jsonBody: { error: "snapshotId is required" } };
+  }
+  // Snapshot IDs look like "CPC_<cloudPcId>_<guid>"; validate the shape loosely.
+  if (!/^[A-Za-z0-9_\-.]+$/.test(snapshotId) || snapshotId.length > 256) {
+    return { status: 400, jsonBody: { error: "Invalid snapshotId format" } };
+  }
+
   try {
     const client = createOboGraphClient(token);
-
-    // endGracePeriod triggers immediate deletion for Cloud PCs in grace period.
-    // For normal Cloud PCs we issue a DELETE on the cloudPC itself, which
-    // transitions it to grace period (Intune will then delete per the tenant's
-    // grace-period policy). Calling endGracePeriod afterwards short-circuits
-    // that wait. We try endGracePeriod first; if the CPC isn't in grace, the
-    // DELETE triggers the transition.
-    try {
-      await client
-        .api(`/deviceManagement/virtualEndpoint/cloudPCs/${cloudPcId}/endGracePeriod`)
-        .version("beta")
-        .post({});
-    } catch {
-      // Not in grace period yet — issue the regular delete, which starts it.
-      await client
-        .api(`/deviceManagement/virtualEndpoint/cloudPCs/${cloudPcId}`)
-        .version("beta")
-        .delete();
-    }
+    await client
+      .api(`/deviceManagement/virtualEndpoint/cloudPCs/${cloudPcId}/restore`)
+      .version("beta")
+      .post({ cloudPcSnapshotId: snapshotId });
 
     return {
       status: 202,
       jsonBody: {
         data: {
           cloudPcId,
-          status: "deleting",
-          message: "Cloud PC removal initiated. The device will be decommissioned per your tenant's grace-period policy.",
+          snapshotId,
+          status: "restoring",
+          message: "Restore initiated. The Cloud PC will be unavailable for 5-15 minutes.",
         },
       },
     };
   } catch (error: any) {
-    context.error("Failed to delete Cloud PC:", error);
+    context.error("Failed to restore Cloud PC:", error);
     return {
       status: error.statusCode || 500,
       jsonBody: { error: sanitizeErrorMessage(error) },
@@ -119,9 +126,9 @@ async function deleteCloudPC(request: HttpRequest, context: InvocationContext): 
   }
 }
 
-app.http("deleteCloudPC", {
-  methods: ["DELETE"],
+app.http("restoreCloudPC", {
+  methods: ["POST"],
   authLevel: "anonymous",
-  route: "cloudpcs/{id}",
-  handler: deleteCloudPC,
+  route: "cloudpcs/{id}/restore",
+  handler: restoreCloudPC,
 });
