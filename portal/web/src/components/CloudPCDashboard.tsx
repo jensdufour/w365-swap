@@ -5,11 +5,45 @@ import { useCallback, useEffect, useState } from "react";
 import { cloudPcApi } from "@/lib/api-client";
 
 const STORAGE_ACCOUNT_ID = process.env.NEXT_PUBLIC_STORAGE_ACCOUNT_ID || "";
+const PENDING_SWAPS_STORAGE_KEY = "w365swap.pendingSwaps";
+// Drop pending entries after 3h — real exports complete in 20-60 min, so
+// anything older is almost certainly a failed export we should stop showing.
+const PENDING_SWAP_TTL_MS = 3 * 60 * 60 * 1000;
+
+type PendingSwap = {
+  projectName: string;
+  cloudPcId: string;
+  cloudPcName: string;
+  startedAt: string; // ISO
+};
+
+function loadPendingSwaps(): PendingSwap[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = window.localStorage.getItem(PENDING_SWAPS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as PendingSwap[];
+    const cutoff = Date.now() - PENDING_SWAP_TTL_MS;
+    return parsed.filter((p) => new Date(p.startedAt).getTime() >= cutoff);
+  } catch {
+    return [];
+  }
+}
+
+function savePendingSwaps(list: PendingSwap[]) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(PENDING_SWAPS_STORAGE_KEY, JSON.stringify(list));
+  } catch {
+    /* ignore quota errors */
+  }
+}
 
 export function CloudPCDashboard() {
   const { instance } = useMsal();
   const [cloudPCs, setCloudPCs] = useState<any[]>([]);
   const [swaps, setSwaps] = useState<any[]>([]);
+  const [pendingSwaps, setPendingSwaps] = useState<PendingSwap[]>([]);
   const [loading, setLoading] = useState(true);
   const [swapsLoading, setSwapsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -47,7 +81,30 @@ export function CloudPCDashboard() {
   useEffect(() => {
     loadCloudPCs();
     loadSwaps();
+    setPendingSwaps(loadPendingSwaps());
   }, [loadCloudPCs, loadSwaps]);
+
+  // Persist pending swaps whenever they change.
+  useEffect(() => {
+    savePendingSwaps(pendingSwaps);
+  }, [pendingSwaps]);
+
+  // Drop pending entries once a matching completed blob appears in the swaps list.
+  useEffect(() => {
+    if (pendingSwaps.length === 0 || swaps.length === 0) return;
+    const matched = new Set(
+      pendingSwaps
+        .filter((p) =>
+          swaps.some((s: any) =>
+            typeof s.name === "string" && s.name.toLowerCase().includes(p.projectName.toLowerCase())
+          )
+        )
+        .map((p) => p.projectName)
+    );
+    if (matched.size > 0) {
+      setPendingSwaps((prev) => prev.filter((p) => !matched.has(p.projectName)));
+    }
+  }, [swaps, pendingSwaps]);
 
   // Track operations that have been submitted (show progress in-dialog)
   const [saveResult, setSaveResult] = useState<"success" | "error" | null>(null);
@@ -58,11 +115,13 @@ export function CloudPCDashboard() {
   // Auto-poll swaps list when an export is in progress
   const [pendingExports, setPendingExports] = useState<number>(0);
 
+  // Auto-poll swaps list while an export is in progress (either just-submitted
+  // or a leftover from a previous session persisted in localStorage).
   useEffect(() => {
-    if (pendingExports === 0) return;
+    if (pendingExports === 0 && pendingSwaps.length === 0) return;
     const interval = setInterval(() => loadSwaps(), 30_000);
     return () => clearInterval(interval);
-  }, [pendingExports, loadSwaps]);
+  }, [pendingExports, pendingSwaps.length, loadSwaps]);
 
   const handleSaveSwap = async (cloudPcId: string, projectName: string) => {
     setSaving(cloudPcId);
@@ -77,6 +136,17 @@ export function CloudPCDashboard() {
       });
       setSaveResult("success");
       setPendingExports((n) => n + 1);
+      const cpc = cloudPCs.find((c) => c.id === cloudPcId);
+      setPendingSwaps((prev) => {
+        const next = prev.filter((p) => p.projectName !== projectName);
+        next.unshift({
+          projectName,
+          cloudPcId,
+          cloudPcName: cpc?.displayName || cloudPcId,
+          startedAt: new Date().toISOString(),
+        });
+        return next;
+      });
     } catch (err: any) {
       setSaveError(err.message);
       setSaveResult("error");
@@ -226,9 +296,9 @@ export function CloudPCDashboard() {
           </p>
         </div>
 
-        {swapsLoading ? (
+        {swapsLoading && pendingSwaps.length === 0 && swaps.length === 0 ? (
           <div className="text-gray-500 text-sm py-4">Loading saved swaps...</div>
-        ) : swaps.length === 0 ? (
+        ) : swaps.length === 0 && pendingSwaps.length === 0 ? (
           <div className="bg-white rounded-lg border border-gray-200 p-8 text-center">
             <p className="text-gray-500 text-sm">
               No saved swaps yet. Save a Cloud PC environment to get started.
@@ -247,6 +317,43 @@ export function CloudPCDashboard() {
                 </tr>
               </thead>
               <tbody>
+                {pendingSwaps.map((p) => (
+                  <tr
+                    key={`pending-${p.projectName}-${p.startedAt}`}
+                    className="border-b border-gray-100 last:border-0 bg-blue-50/40"
+                  >
+                    <td className="px-4 py-3 font-medium text-gray-900">
+                      <div className="flex items-center gap-2">
+                        <span className="inline-block w-3 h-3 border-2 border-blue-600 border-t-transparent rounded-full animate-spin" />
+                        {p.projectName}
+                      </div>
+                      <div className="text-xs text-gray-400 font-normal truncate max-w-xs">
+                        Exporting from {p.cloudPcName}
+                      </div>
+                    </td>
+                    <td className="px-4 py-3 text-gray-500 italic">&mdash;</td>
+                    <td className="px-4 py-3 text-gray-600">{formatDate(p.startedAt)}</td>
+                    <td className="px-4 py-3">
+                      <span className="text-xs px-2 py-0.5 rounded-full bg-blue-100 text-blue-700">
+                        Exporting
+                      </span>
+                    </td>
+                    <td className="px-4 py-3 text-right">
+                      <span className="text-xs text-gray-500">typically 20&ndash;60 min</span>
+                      <button
+                        onClick={() =>
+                          setPendingSwaps((prev) =>
+                            prev.filter((x) => x.projectName !== p.projectName)
+                          )
+                        }
+                        className="ml-3 text-xs text-gray-400 hover:text-gray-600 underline"
+                        title="Dismiss this pending indicator (does not cancel the export)"
+                      >
+                        Dismiss
+                      </button>
+                    </td>
+                  </tr>
+                ))}
                 {swaps.map((swap) => (
                   <tr
                     key={swap.name}

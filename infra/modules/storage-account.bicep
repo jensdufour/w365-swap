@@ -28,8 +28,18 @@ resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
     minimumTlsVersion: 'TLS1_2'
     supportsHttpsTrafficOnly: true
     publicNetworkAccess: 'Enabled'
+    // Windows 365 Cloud PC snapshot export (Graph createSnapshot with a
+    // customer storageAccountId) issues writes from the W365 service, which
+    // is NOT covered by the 'AzureServices' bypass list. A 'Deny' default
+    // therefore causes the export to silently fail with 'ShareSnapshot: Failed'
+    // in Intune, even when RBAC is correct.
+    //
+    // Data plane remains protected because shared key access is disabled:
+    // every caller must present a valid Entra ID token with an appropriate
+    // RBAC role on this account. Public network access at the TCP level is
+    // not a data-exfil risk under that model.
     networkAcls: {
-      defaultAction: 'Deny'
+      defaultAction: 'Allow'
       bypass: 'AzureServices'
       virtualNetworkRules: [for subnetId in allowedSubnetIds: {
         id: subnetId
