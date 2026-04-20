@@ -109,7 +109,7 @@ function Import-W365Environment {
     }
 
     # Track in state
-    $operationId = "import-$(Get-Date -Format 'yyyyMMddHHmmss')"
+    $operationId = New-OperationId -Type 'import'
     Add-OperationRecord -OperationId $operationId -Type 'import' -CloudPcId 'pending' -ProjectName ($ProjectName ?? $BlobName)
 
     if ($ProjectName) {

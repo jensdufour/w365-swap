@@ -65,7 +65,7 @@ function Export-W365Environment {
     $blobPath = "snapshots/$($upn.Replace('@', '_'))/$ProjectName/$(Get-Date -Format 'yyyyMMdd-HHmmss').vhd"
 
     # Track in state
-    $operationId = "export-$CloudPcId-$(Get-Date -Format 'yyyyMMddHHmmss')"
+    $operationId = New-OperationId -Type 'export' -CloudPcId $CloudPcId
     Add-EnvironmentRecord -CloudPcId $CloudPcId -ProjectName $ProjectName `
         -Status 'exporting' -UserPrincipalName $upn -BlobPath $blobPath
     Add-OperationRecord -OperationId $operationId -Type 'export' -CloudPcId $CloudPcId -ProjectName $ProjectName

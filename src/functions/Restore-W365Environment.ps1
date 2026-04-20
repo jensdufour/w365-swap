@@ -90,7 +90,7 @@ function Restore-W365Environment {
         throw
     }
 
-    $operationId = "restore-$CloudPcId-$(Get-Date -Format 'yyyyMMddHHmmss')"
+    $operationId = New-OperationId -Type 'restore' -CloudPcId $CloudPcId
     Add-OperationRecord -OperationId $operationId -Type 'restore' -CloudPcId $CloudPcId
 
     Write-Host "Restore initiated. Operation: $operationId" -ForegroundColor Green

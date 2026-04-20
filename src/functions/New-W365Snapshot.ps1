@@ -51,15 +51,11 @@ function New-W365Snapshot {
 
     Write-Host "Creating snapshot for Cloud PC $CloudPcId..." -ForegroundColor Cyan
 
+    # Invoke-GraphRequest treats an empty hashtable as no body, so a single
+    # call covers both the default-storage and customer-storage cases.
     try {
-        if ($body.Count -gt 0) {
-            Invoke-GraphRequest -Uri "/deviceManagement/virtualEndpoint/cloudPCs/$CloudPcId/createSnapshot" `
-                -Method POST -Body $body
-        }
-        else {
-            Invoke-GraphRequest -Uri "/deviceManagement/virtualEndpoint/cloudPCs/$CloudPcId/createSnapshot" `
-                -Method POST
-        }
+        Invoke-GraphRequest -Uri "/deviceManagement/virtualEndpoint/cloudPCs/$CloudPcId/createSnapshot" `
+            -Method POST -Body $body
     }
     catch {
         Write-Error "Failed to create snapshot: $_"
