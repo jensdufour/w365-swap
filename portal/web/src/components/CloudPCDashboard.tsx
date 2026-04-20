@@ -125,7 +125,11 @@ export function CloudPCDashboard() {
     return () => clearInterval(interval);
   }, [pendingExports, pendingSwaps.length, loadSwaps]);
 
-  const handleSaveSwap = async (cloudPcId: string, projectName: string) => {
+  const handleSaveSwap = async (
+    cloudPcId: string,
+    projectName: string,
+    accessTier: "hot" | "cool" | "cold" | "archive",
+  ) => {
     setSaving(cloudPcId);
     setSaveResult(null);
     setSaveError(null);
@@ -134,7 +138,7 @@ export function CloudPCDashboard() {
         cloudPcId,
         projectName,
         storageAccountId: STORAGE_ACCOUNT_ID,
-        accessTier: "cool",
+        accessTier,
       });
       setSaveResult("success");
       setPendingExports((n) => n + 1);
@@ -409,7 +413,7 @@ export function CloudPCDashboard() {
           saving={saving === showSaveDialog.id}
           result={saveResult}
           errorMessage={saveError}
-          onSave={(name) => handleSaveSwap(showSaveDialog.id, name)}
+          onSave={(name, tier) => handleSaveSwap(showSaveDialog.id, name, tier)}
           onClose={() => {
             setShowSaveDialog(null);
             setSaveResult(null);
@@ -477,10 +481,14 @@ function SaveSwapDialog({
   saving: boolean;
   result: "success" | "error" | null;
   errorMessage: string | null;
-  onSave: (name: string) => void;
+  onSave: (name: string, tier: "hot" | "cool" | "cold" | "archive") => void;
   onClose: () => void;
 }) {
   const [name, setName] = useState("");
+  // Default to 'hot' — mirrors the Intune "Create Restore Point" manual flow
+  // and gives the fastest rehydrate when loading the swap back later. Users
+  // who want cheaper storage can still pick cool/cold/archive.
+  const [tier, setTier] = useState<"hot" | "cool" | "cold" | "archive">("hot");
 
   return (
     <>
@@ -557,7 +565,26 @@ function SaveSwapDialog({
                 autoFocus
               />
               <p className="text-xs text-gray-400 mt-1">
-                This becomes the blob filename. Typically takes 20-60 min to complete.
+                A label for your records. The actual blob is named by Windows 365.
+                Typically takes 20&ndash;60 min to complete.
+              </p>
+
+              <label className="block text-sm font-medium text-gray-700 mt-4 mb-1">
+                Storage tier
+              </label>
+              <select
+                value={tier}
+                onChange={(e) => setTier(e.target.value as typeof tier)}
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none bg-white"
+              >
+                <option value="hot">Hot &mdash; fastest load, highest storage cost</option>
+                <option value="cool">Cool &mdash; cheaper, slight rehydrate delay</option>
+                <option value="cold">Cold &mdash; even cheaper, longer rehydrate</option>
+                <option value="archive">Archive &mdash; cheapest, hours to rehydrate</option>
+              </select>
+              <p className="text-xs text-gray-400 mt-1">
+                Matches the access tier you choose manually in Intune &rarr;
+                Restore Points &rarr; Create Restore Point.
               </p>
 
               <div className="flex justify-end gap-2 mt-6">
@@ -568,7 +595,7 @@ function SaveSwapDialog({
                   Cancel
                 </button>
                 <button
-                  onClick={() => onSave(name)}
+                  onClick={() => onSave(name, tier)}
                   disabled={!name.trim()}
                   className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
                 >
