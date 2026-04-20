@@ -90,13 +90,15 @@ export function CloudPCDashboard() {
   }, [pendingSwaps]);
 
   // Drop pending entries once a matching completed blob appears in the swaps list.
+  // Windows 365 names exported blobs "CPC_<cloudPcId>_<guid>.vhd" — it does NOT
+  // include the user-supplied projectName — so we match on cloudPcId instead.
   useEffect(() => {
     if (pendingSwaps.length === 0 || swaps.length === 0) return;
     const matched = new Set(
       pendingSwaps
         .filter((p) =>
           swaps.some((s: any) =>
-            typeof s.name === "string" && s.name.toLowerCase().includes(p.projectName.toLowerCase())
+            typeof s.name === "string" && s.name.toLowerCase().includes(p.cloudPcId.toLowerCase())
           )
         )
         .map((p) => p.projectName)
@@ -155,7 +157,7 @@ export function CloudPCDashboard() {
     }
   };
 
-  const handleLoadSwap = async (blobName: string) => {
+  const handleLoadSwap = async (blobName: string, containerName?: string) => {
     const account = instance.getActiveAccount();
     if (!account?.localAccountId) {
       setLoadError("Cannot determine user ID. Please sign out and back in.");
@@ -170,6 +172,7 @@ export function CloudPCDashboard() {
         userId: account.localAccountId,
         storageAccountId: STORAGE_ACCOUNT_ID,
         blobName,
+        containerName,
       });
       setLoadResult("success");
     } catch (err: any) {
@@ -194,8 +197,18 @@ export function CloudPCDashboard() {
     });
   };
 
-  const friendlyName = (blobName: string) =>
-    blobName.replace(/^.*\//, "").replace(/\.(vhdx?|vmgs)$/i, "");
+  const friendlyName = (blobName: string) => {
+    // Strip any container-like prefix and the file extension.
+    const base = blobName.replace(/^.*\//, "").replace(/\.(vhdx?|vmgs)$/i, "");
+    // Windows 365 exports are named "CPC_<cloudPcId>_<guid>". Look up the
+    // originating Cloud PC by ID so users see its display name instead of GUIDs.
+    const match = base.match(/^CPC_([0-9a-f-]{36})_/i);
+    if (match) {
+      const cpc = cloudPCs.find((c) => c.id?.toLowerCase() === match[1].toLowerCase());
+      if (cpc?.displayName) return cpc.displayName;
+    }
+    return base;
+  };
 
   if (loading) {
     return (
@@ -412,7 +425,7 @@ export function CloudPCDashboard() {
           loading={loadingSwap === showLoadDialog.name}
           result={loadResult}
           errorMessage={loadError}
-          onLoad={() => handleLoadSwap(showLoadDialog.name)}
+          onLoad={() => handleLoadSwap(showLoadDialog.name, showLoadDialog.containerName)}
           onClose={() => {
             setShowLoadDialog(null);
             setLoadResult(null);

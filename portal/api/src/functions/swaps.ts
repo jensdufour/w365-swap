@@ -3,7 +3,13 @@ import { BlobServiceClient } from "@azure/storage-blob";
 import { ManagedIdentityCredential } from "@azure/identity";
 import { extractBearerToken } from "../lib/graph-client.js";
 
-const CONTAINER_NAME = "snapshots";
+// Containers we scan for exported Cloud PC VHDs. Windows 365 creates its own
+// per-tenant share container when exporting via Graph createSnapshot (name
+// pattern "windows365-share-ent-<suffix>"), so we include any container whose
+// name matches that prefix in addition to the manually-provisioned "snapshots"
+// container.
+const MANAGED_CONTAINER = "snapshots";
+const W365_CONTAINER_PREFIX = "windows365-share-";
 
 function getStorageAccountName(): string {
   const id = process.env.STORAGE_ACCOUNT_ID || "";
@@ -14,7 +20,8 @@ function getStorageAccountName(): string {
 
 /**
  * GET /api/swaps
- * Lists saved environment swaps (VHD blobs) in the configured storage account.
+ * Lists saved environment swaps (VHD blobs) across all swap-related containers
+ * in the configured storage account.
  */
 async function listSwaps(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const token = extractBearerToken(request.headers.get("authorization") ?? undefined);
@@ -33,26 +40,29 @@ async function listSwaps(request: HttpRequest, context: InvocationContext): Prom
       new ManagedIdentityCredential()
     );
 
-    const containerClient = blobService.getContainerClient(CONTAINER_NAME);
-
-    // Check if container exists
-    const exists = await containerClient.exists();
-    if (!exists) {
-      return { status: 200, jsonBody: { data: [] } };
-    }
-
     const swaps: Array<{
       name: string;
+      containerName: string;
       size: number;
       createdOn: string;
       accessTier: string | undefined;
       contentType: string | undefined;
     }> = [];
 
-    for await (const blob of containerClient.listBlobsFlat({ includeMetadata: true })) {
-      if (blob.name.endsWith(".vhd") || blob.name.endsWith(".vhdx")) {
+    for await (const container of blobService.listContainers()) {
+      if (
+        container.name !== MANAGED_CONTAINER &&
+        !container.name.startsWith(W365_CONTAINER_PREFIX)
+      ) {
+        continue;
+      }
+
+      const containerClient = blobService.getContainerClient(container.name);
+      for await (const blob of containerClient.listBlobsFlat({ includeMetadata: true })) {
+        if (!/\.vhdx?$/i.test(blob.name)) continue;
         swaps.push({
           name: blob.name,
+          containerName: container.name,
           size: blob.properties.contentLength || 0,
           createdOn: blob.properties.createdOn?.toISOString() || "",
           accessTier: blob.properties.accessTier,
