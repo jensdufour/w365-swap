@@ -84,6 +84,7 @@ module portal 'modules/portal.bicep' = {
     location: location
     tags: rg.tags
     storageAccountId: storage.outputs.storageAccountId
+    storageAccountName: storage.outputs.storageAccountName
     tenantId: tenantId
     clientId: clientId
     clientSecret: clientSecret
