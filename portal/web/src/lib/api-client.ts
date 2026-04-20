@@ -74,6 +74,19 @@ export const cloudPcApi = {
   listSwaps: (msal: IPublicClientApplication) =>
     apiRequest<any[]>(msal, `/swaps`),
 
+  /** Delete a saved swap (VHD blob + its .vmgs companion). */
+  deleteSwap: (msal: IPublicClientApplication, containerName: string, blobName: string) =>
+    apiRequest<any>(msal, `/swaps/${encodeURIComponent(containerName)}/${encodeSwapBlobPath(blobName)}`, {
+      method: "DELETE",
+    }),
+
+  /** Rename a saved swap by updating its displayName metadata. */
+  renameSwap: (msal: IPublicClientApplication, containerName: string, blobName: string, displayName: string) =>
+    apiRequest<any>(msal, `/swaps/${encodeURIComponent(containerName)}/${encodeSwapBlobPath(blobName)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ displayName }),
+    }),
+
   /**
    * Provision a new Cloud PC from a saved swap.
    * Graph's importSnapshot always creates a NEW Cloud PC — it cannot replace
@@ -85,3 +98,11 @@ export const cloudPcApi = {
       body: JSON.stringify(data),
     }),
 };
+
+/**
+ * Encodes blob path segments while preserving `/` separators so the server-
+ * side `{*blobName}` catch-all parameter receives the path structure intact.
+ */
+function encodeSwapBlobPath(blobName: string): string {
+  return blobName.split("/").map(encodeURIComponent).join("/");
+}

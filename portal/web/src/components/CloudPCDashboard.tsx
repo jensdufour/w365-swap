@@ -60,6 +60,8 @@ export function CloudPCDashboard() {
   const [saveDialog, setSaveDialog] = useState<{ cpc: any } | null>(null);
   const [restoreDialog, setRestoreDialog] = useState<{ cpc: any } | null>(null);
   const [provisionDialog, setProvisionDialog] = useState<{ swap: any } | null>(null);
+  const [renameDialog, setRenameDialog] = useState<{ swap: any } | null>(null);
+  const [deleteDialog, setDeleteDialog] = useState<{ swap: any } | null>(null);
 
   const [busyCpc, setBusyCpc] = useState<string | null>(null);
   const [busySwap, setBusySwap] = useState<string | null>(null);
@@ -101,22 +103,35 @@ export function CloudPCDashboard() {
 
   useEffect(() => savePending(pendingSwaps), [pendingSwaps]);
 
-  /* Drop pending rows once the completed VHD shows up. */
+  /* When a completed VHD shows up for a pending export, persist the user-
+   * supplied name onto the blob as displayName metadata and drop the pending
+   * row. We only apply the name if the swap doesn't already have one. */
   useEffect(() => {
     if (pendingSwaps.length === 0 || swaps.length === 0) return;
-    const done = new Set(
-      pendingSwaps
-        .filter((p) =>
-          swaps.some(
-            (s: any) => typeof s.name === "string" && s.name.toLowerCase().includes(p.cloudPcId.toLowerCase()),
-          ),
-        )
-        .map((p) => p.projectName),
-    );
-    if (done.size > 0) {
-      setPendingSwaps((prev) => prev.filter((p) => !done.has(p.projectName)));
+    const matched: Array<{ pending: PendingSwap; swap: any }> = [];
+    for (const p of pendingSwaps) {
+      const swap = swaps.find(
+        (s: any) => typeof s.name === "string" && s.name.toLowerCase().includes(p.cloudPcId.toLowerCase()),
+      );
+      if (swap) matched.push({ pending: p, swap });
     }
-  }, [swaps, pendingSwaps]);
+    if (matched.length === 0) return;
+
+    (async () => {
+      for (const { pending, swap } of matched) {
+        if (!swap.displayName && pending.projectName) {
+          try {
+            await cloudPcApi.renameSwap(instance, swap.containerName, swap.name, pending.projectName);
+          } catch (err) {
+            console.warn("Failed to persist pending displayName:", err);
+          }
+        }
+      }
+      const doneNames = new Set(matched.map((m) => m.pending.projectName));
+      setPendingSwaps((prev) => prev.filter((p) => !doneNames.has(p.projectName)));
+      loadSwaps();
+    })();
+  }, [swaps, pendingSwaps, instance, loadSwaps]);
 
   /* Auto-poll while an export is in flight. */
   useEffect(() => {
@@ -172,6 +187,34 @@ export function CloudPCDashboard() {
       showToast("error", `Restore failed: ${err.message}`);
     } finally {
       setBusyCpc(null);
+    }
+  }
+
+  async function handleRenameSwap(swap: any, displayName: string) {
+    setBusySwap(swap.name);
+    try {
+      await cloudPcApi.renameSwap(instance, swap.containerName, swap.name, displayName);
+      setRenameDialog(null);
+      showToast("success", "Renamed.");
+      loadSwaps();
+    } catch (err: any) {
+      showToast("error", `Rename failed: ${err.message}`);
+    } finally {
+      setBusySwap(null);
+    }
+  }
+
+  async function handleDeleteSwap(swap: any) {
+    setBusySwap(swap.name);
+    try {
+      await cloudPcApi.deleteSwap(instance, swap.containerName, swap.name);
+      setDeleteDialog(null);
+      showToast("success", "Swap deleted.");
+      loadSwaps();
+    } catch (err: any) {
+      showToast("error", `Delete failed: ${err.message}`);
+    } finally {
+      setBusySwap(null);
     }
   }
 
@@ -295,6 +338,8 @@ export function CloudPCDashboard() {
                     cloudPCs={cloudPCs}
                     busy={busySwap === swap.name}
                     onProvision={() => setProvisionDialog({ swap })}
+                    onRename={() => setRenameDialog({ swap })}
+                    onDelete={() => setDeleteDialog({ swap })}
                   />
                 ))}
               </tbody>
@@ -329,6 +374,24 @@ export function CloudPCDashboard() {
           onConfirm={() => handleProvisionFromSwap(provisionDialog.swap)}
         />
       )}
+      {renameDialog && (
+        <RenameSwapDialog
+          swap={renameDialog.swap}
+          cloudPCs={cloudPCs}
+          busy={busySwap === renameDialog.swap.name}
+          onCancel={() => setRenameDialog(null)}
+          onConfirm={(name) => handleRenameSwap(renameDialog.swap, name)}
+        />
+      )}
+      {deleteDialog && (
+        <DeleteSwapDialog
+          swap={deleteDialog.swap}
+          cloudPCs={cloudPCs}
+          busy={busySwap === deleteDialog.swap.name}
+          onCancel={() => setDeleteDialog(null)}
+          onConfirm={() => handleDeleteSwap(deleteDialog.swap)}
+        />
+      )}
 
       {toast && <Toast kind={toast.kind} msg={toast.msg} onClose={() => setToast(null)} />}
     </div>
@@ -339,7 +402,15 @@ export function CloudPCDashboard() {
  * Small helpers & formatters
  * ========================================================================= */
 
-function friendlyName(blobName: string, cloudPCs: any[]): string {
+function friendlyName(swapOrBlobName: any, cloudPCs: any[]): string {
+  // Accept either a swap object (with optional displayName) or a raw blob name.
+  if (typeof swapOrBlobName === "object" && swapOrBlobName !== null) {
+    if (typeof swapOrBlobName.displayName === "string" && swapOrBlobName.displayName.trim()) {
+      return swapOrBlobName.displayName;
+    }
+    return friendlyName(swapOrBlobName.name ?? "", cloudPCs);
+  }
+  const blobName = String(swapOrBlobName ?? "");
   const base = blobName.replace(/^.*\//, "").replace(/\.(vhdx?|vmgs)$/i, "");
   const match = base.match(/^CPC_([0-9a-f-]{36})_/i);
   if (match) {
@@ -526,16 +597,20 @@ function SwapRow({
   cloudPCs,
   busy,
   onProvision,
+  onRename,
+  onDelete,
 }: {
   swap: any;
   cloudPCs: any[];
   busy: boolean;
   onProvision: () => void;
+  onRename: () => void;
+  onDelete: () => void;
 }) {
   return (
     <tr className="border-b border-gray-100 last:border-0 hover:bg-gray-50">
       <td className="px-4 py-3 font-medium text-gray-900">
-        {friendlyName(swap.name, cloudPCs)}
+        {friendlyName(swap, cloudPCs)}
         <div className="text-xs text-gray-400 font-normal truncate max-w-xs">{swap.name}</div>
       </td>
       <td className="px-4 py-3 text-gray-600">{formatSize(swap.size)}</td>
@@ -544,13 +619,31 @@ function SwapRow({
         <span className="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-600">{swap.accessTier || "—"}</span>
       </td>
       <td className="px-4 py-3 text-right">
-        <button
-          onClick={onProvision}
-          disabled={busy}
-          className="bg-green-600 text-white text-sm px-3 py-1.5 rounded-lg hover:bg-green-700 disabled:opacity-50"
-        >
-          {busy ? "Working…" : "Provision new Cloud PC"}
-        </button>
+        <div className="inline-flex items-center gap-2">
+          <button
+            onClick={onRename}
+            disabled={busy}
+            className="text-xs text-gray-600 hover:text-gray-900 underline disabled:opacity-50"
+            title="Rename this swap"
+          >
+            Rename
+          </button>
+          <button
+            onClick={onDelete}
+            disabled={busy}
+            className="text-xs text-red-600 hover:text-red-800 underline disabled:opacity-50"
+            title="Delete this swap"
+          >
+            Delete
+          </button>
+          <button
+            onClick={onProvision}
+            disabled={busy}
+            className="bg-green-600 text-white text-sm px-3 py-1.5 rounded-lg hover:bg-green-700 disabled:opacity-50"
+          >
+            {busy ? "Working…" : "Provision new Cloud PC"}
+          </button>
+        </div>
       </td>
     </tr>
   );
@@ -608,18 +701,19 @@ function SaveSwapDialog({
       onClose={onCancel}
       disabled={busy}
     >
-      <label className="block text-sm font-medium text-gray-700 mb-1">Swap label</label>
+      <label className="block text-sm font-medium text-gray-700 mb-1">Swap name</label>
       <input
         type="text"
         value={name}
         onChange={(e) => setName(e.target.value)}
         placeholder="e.g. project-alpha-sprint-3"
+        maxLength={200}
         className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
         autoFocus
         disabled={busy}
       />
       <p className="text-xs text-gray-400 mt-1">
-        A label for your records. Windows 365 names the blob itself.
+        Shown in the Saved Swaps list. You can rename it later.
       </p>
 
       <label className="block text-sm font-medium text-gray-700 mt-4 mb-1">Storage tier</label>
@@ -780,7 +874,7 @@ function ProvisionDialog({
   onCancel: () => void;
   onConfirm: () => void;
 }) {
-  const name = useMemo(() => friendlyName(swap.name, cloudPCs), [swap.name, cloudPCs]);
+  const name = useMemo(() => friendlyName(swap, cloudPCs), [swap, cloudPCs]);
   return (
     <DialogShell
       title="Provision new Cloud PC from swap"
@@ -806,6 +900,124 @@ function ProvisionDialog({
           className="px-4 py-2 text-sm bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50"
         >
           {busy ? "Submitting…" : "Provision new Cloud PC"}
+        </button>
+      </div>
+    </DialogShell>
+  );
+}
+
+function RenameSwapDialog({
+  swap,
+  cloudPCs,
+  busy,
+  onCancel,
+  onConfirm,
+}: {
+  swap: any;
+  cloudPCs: any[];
+  busy: boolean;
+  onCancel: () => void;
+  onConfirm: (name: string) => void;
+}) {
+  const fallback = useMemo(() => friendlyName(swap, cloudPCs), [swap, cloudPCs]);
+  const [name, setName] = useState<string>(swap.displayName || "");
+  const canSave = name.trim().length > 0 && name.trim() !== (swap.displayName || "");
+  return (
+    <DialogShell
+      title="Rename swap"
+      subtitle="Give this swap a friendlier label. The underlying blob name stays the same."
+      onClose={onCancel}
+      disabled={busy}
+    >
+      <label className="block text-sm font-medium text-gray-700 mb-1">Name</label>
+      <input
+        type="text"
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        placeholder={fallback}
+        maxLength={200}
+        className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+        autoFocus
+        disabled={busy}
+      />
+      <p className="text-xs text-gray-400 mt-1 truncate">Blob: {swap.name}</p>
+
+      <div className="flex justify-end gap-2 mt-6">
+        <button
+          onClick={onCancel}
+          disabled={busy}
+          className="px-4 py-2 text-sm text-gray-700 border border-gray-300 rounded-lg hover:bg-gray-50"
+        >
+          Cancel
+        </button>
+        <button
+          onClick={() => onConfirm(name.trim())}
+          disabled={!canSave || busy}
+          className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
+        >
+          {busy ? "Saving…" : "Save name"}
+        </button>
+      </div>
+    </DialogShell>
+  );
+}
+
+function DeleteSwapDialog({
+  swap,
+  cloudPCs,
+  busy,
+  onCancel,
+  onConfirm,
+}: {
+  swap: any;
+  cloudPCs: any[];
+  busy: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const name = useMemo(() => friendlyName(swap, cloudPCs), [swap, cloudPCs]);
+  const [confirmText, setConfirmText] = useState("");
+  const canDelete = confirmText.trim().toLowerCase() === "delete";
+  return (
+    <DialogShell
+      title="Delete swap"
+      subtitle={`Permanently removes "${name}" from your storage account.`}
+      onClose={onCancel}
+      disabled={busy}
+    >
+      <div className="bg-red-50 border border-red-200 rounded-md p-3 text-xs text-red-800">
+        <strong>This cannot be undone.</strong> The VHD and its guest-state companion (.vmgs) will be
+        deleted. Cloud PCs you&apos;ve already provisioned from this swap are not affected.
+      </div>
+
+      <label className="block text-sm font-medium text-gray-700 mt-4 mb-1">
+        Type <span className="font-mono">delete</span> to confirm
+      </label>
+      <input
+        type="text"
+        value={confirmText}
+        onChange={(e) => setConfirmText(e.target.value)}
+        placeholder="delete"
+        className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-red-500 focus:border-transparent outline-none"
+        autoFocus
+        disabled={busy}
+      />
+      <p className="text-xs text-gray-400 mt-1 truncate">Blob: {swap.name}</p>
+
+      <div className="flex justify-end gap-2 mt-6">
+        <button
+          onClick={onCancel}
+          disabled={busy}
+          className="px-4 py-2 text-sm text-gray-700 border border-gray-300 rounded-lg hover:bg-gray-50"
+        >
+          Cancel
+        </button>
+        <button
+          onClick={onConfirm}
+          disabled={!canDelete || busy}
+          className="px-4 py-2 text-sm bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50"
+        >
+          {busy ? "Deleting…" : "Delete swap"}
         </button>
       </div>
     </DialogShell>
