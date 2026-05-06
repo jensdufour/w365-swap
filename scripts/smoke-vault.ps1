@@ -83,6 +83,46 @@ $one = Invoke-Step "GET /states/$($state.id)" {
 }
 if ($one.id -ne $state.id) { throw "GET /states/{id} returned wrong record." }
 Write-Host "  round-trip OK" -ForegroundColor DarkGray
+# Belt-and-suspenders: list/get responses must NEVER include the wrappedDek.
+if ($one.PSObject.Properties['wrappedDek']) { throw "GET /states/{id} leaked wrappedDek!" }
+Write-Host "  no wrappedDek leak in metadata response" -ForegroundColor DarkGray
+
+# --- 4b. POST /states/{id}/dek  (envelope-encryption round-trip) ---------
+$dekResp1 = Invoke-Step "POST /states/$($state.id)/dek" {
+    Invoke-RestMethod -Method Post -Uri "$apiUrl/api/states/$($state.id)/dek" -Headers $headers
+}
+$dekBytes = [Convert]::FromBase64String($dekResp1.dek)
+if ($dekBytes.Length -ne 32) { throw "DEK is $($dekBytes.Length) bytes; expected 32 (AES-256)." }
+if ($dekResp1.algorithm -ne 'AES-256-GCM') { throw "Unexpected algorithm: $($dekResp1.algorithm)" }
+if (-not $dekResp1.kekKid) { throw "Response missing kekKid." }
+Write-Host "  DEK length: $($dekBytes.Length) bytes (AES-256)" -ForegroundColor DarkGray
+Write-Host "  algorithm:  $($dekResp1.algorithm)" -ForegroundColor DarkGray
+Write-Host "  kekKid:     $($dekResp1.kekKid)" -ForegroundColor DarkGray
+
+# Idempotency: same state, second call must return the same DEK (the wrap
+# happened once at create-time and is stable for this StateRecord).
+$dekResp2 = Invoke-RestMethod -Method Post -Uri "$apiUrl/api/states/$($state.id)/dek" -Headers $headers
+if ($dekResp2.dek -ne $dekResp1.dek) { throw "DEK unwrap is non-deterministic for the same state!" }
+Write-Host "  re-unwrap is stable across calls (same state)" -ForegroundColor DarkGray
+
+# Per-state isolation: a NEW state must have a DIFFERENT DEK.
+$state2 = Invoke-RestMethod -Method Post -Uri "$apiUrl/api/states" -Headers $headers -Body (@{label='isolation'} | ConvertTo-Json) -ContentType 'application/json'
+$dekResp3 = Invoke-RestMethod -Method Post -Uri "$apiUrl/api/states/$($state2.id)/dek" -Headers $headers
+if ($dekResp3.dek -eq $dekResp1.dek) { throw "Two different states share the same DEK \u2014 broken isolation!" }
+Write-Host "  per-state DEK isolation verified (different state \u2192 different DEK)" -ForegroundColor DarkGray
+
+# Cross-user isolation: same caller asking for a NON-EXISTENT state must 404
+# (we don't have a second user handy to test true cross-user, but a random
+# UUID exercises the same partition-key check that enforces it).
+try {
+    $bogusId = [guid]::NewGuid().ToString()
+    Invoke-RestMethod -Method Post -Uri "$apiUrl/api/states/$bogusId/dek" -Headers $headers | Out-Null
+    throw "Bogus state id unexpectedly returned a DEK."
+} catch {
+    $st = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 0 }
+    if ($st -ne 404) { throw "Bogus state id returned $st (expected 404)." }
+    Write-Host "  bogus state id \u2192 404 (no info leak)" -ForegroundColor DarkGray
+}
 
 # --- 5. POST /chunks/upload-sas  (mint upload SAS) -----------------------
 # Hash must match ^[a-f0-9]{64}$ (BLAKE3 fingerprint, hex-encoded).

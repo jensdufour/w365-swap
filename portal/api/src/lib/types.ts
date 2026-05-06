@@ -40,12 +40,16 @@ export interface StateRecord {
   totalSize?: number;
   chunkCount?: number;
   /**
-   * Per-state DEK wrapped by the customer's KEK in their Key Vault. Base64.
-   * Service stores wrapped DEK only; cannot derive plaintext.
+   * Per-state Data Encryption Key (DEK) wrapped by the customer's KEK in
+   * Azure Key Vault using RSA-OAEP-256. Base64url-encoded ciphertext.
+   * Service never persists or transmits the plaintext DEK. Only an
+   * authenticated owner can call /states/{id}/dek to unwrap it.
    */
-  encryptedDek?: string;
-  /** AES-GCM IV for chunk decryption. Base64. */
-  iv?: string;
+  wrappedDek?: string;
+  /** Full Key Vault key id (vault URL + name + version) used to wrap the DEK. */
+  kekKid?: string;
+  /** Symmetric algorithm the agent uses with the DEK. */
+  dekAlgorithm?: "AES-256-GCM";
 }
 
 /**

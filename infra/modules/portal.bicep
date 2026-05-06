@@ -96,7 +96,11 @@ resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
   properties: {
     sku: {
       family: 'A'
-      name: 'standard'
+      // Premium is required to host HSM-protected (RSA-HSM) keys, used by
+      // the KEK below for envelope encryption of per-state DEKs. Premium
+      // is ~$5/month base + per-op fees and supports both software- and
+      // HSM-protected keys in the same vault.
+      name: 'premium'
     }
     tenantId: subscription().tenantId
     enableRbacAuthorization: true
@@ -111,6 +115,29 @@ resource clientSecretEntry 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
   name: 'azure-client-secret'
   properties: {
     value: clientSecret
+  }
+}
+
+// Key Encryption Key (KEK) — HSM-protected RSA-4096 used to wrap/unwrap
+// per-state Data Encryption Keys (DEKs). The Function App MI never sees
+// the raw KEK material; it only calls wrapKey/unwrapKey via the Key Vault
+// REST API. Customers can later replace this with a BYOK flow that points
+// at their own vault/Managed HSM.
+var kekName = 'mosaic-kek'
+resource kek 'Microsoft.KeyVault/vaults/keys@2023-07-01' = {
+  parent: keyVault
+  name: kekName
+  properties: {
+    kty: 'RSA-HSM'
+    keySize: 4096
+    keyOps: [
+      'wrapKey'
+      'unwrapKey'
+    ]
+    attributes: {
+      enabled: true
+      exportable: false
+    }
   }
 }
 
@@ -181,6 +208,9 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
         { name: 'COSMOS_ENDPOINT', value: cosmosEndpoint }
         { name: 'STATES_STORAGE_ACCOUNT_NAME', value: statesStorageAccountName }
         { name: 'STATES_CONTAINER_NAME', value: statesContainerName }
+        // Mosaic v0 — envelope encryption KEK
+        { name: 'KEK_VAULT_URL', value: keyVault.properties.vaultUri }
+        { name: 'KEK_KEY_NAME', value: kekName }
       ]
       minTlsVersion: '1.2'
       ftpsState: 'Disabled'
@@ -221,6 +251,21 @@ resource kvRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' =
   scope: keyVault
   properties: {
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '4633458b-17de-408a-b874-0445c86b69e6')
+    principalId: functionApp.identity.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+// Grant the Function App identity Key Vault Crypto User on the vault. This
+// allows wrapKey/unwrapKey/encrypt/decrypt/sign/verify on keys but NOT
+// key creation, listing, deletion, or purging — the principle of least
+// privilege for an envelope-encryption worker. Built-in role id:
+// 12338af0-0e69-4776-bea7-57ae8d297424.
+resource kvCryptoRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(keyVault.id, functionAppName, 'Key Vault Crypto User')
+  scope: keyVault
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '12338af0-0e69-4776-bea7-57ae8d297424')
     principalId: functionApp.identity.principalId
     principalType: 'ServicePrincipal'
   }
@@ -299,5 +344,7 @@ output functionAppUrl string = 'https://${functionApp.properties.defaultHostName
 output functionAppName string = functionApp.name
 
 output keyVaultName string = keyVault.name
+output keyVaultUri string = keyVault.properties.vaultUri
+output kekName string = kekName
 output functionAppResourceId string = functionApp.id
 output functionAppPrincipalId string = functionApp.identity.principalId
