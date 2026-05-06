@@ -172,14 +172,24 @@ if (-not $existingScope) {
             oauth2PermissionScopes = @(
                 @{
                     id                      = $scopeId
-                        adminConsentDescription = 'Access the Mosaic API on behalf of the user'
-                        adminConsentDisplayName = 'Access Mosaic API'
-                        isEnabled               = $true
-                        type                    = 'User'
-                        userConsentDescription  = 'Access the Mosaic API on your behalf'
-                        userConsentDisplayName  = 'Access Mosaic API'
+                    adminConsentDescription = 'Access the Mosaic API on behalf of the user'
+                    adminConsentDisplayName = 'Access Mosaic API'
+                    isEnabled               = $true
+                    type                    = 'User'
+                    userConsentDescription  = 'Access the Mosaic API on your behalf'
+                    userConsentDisplayName  = 'Access Mosaic API'
+                    value                   = 'access_as_user'
+                }
+            )
+        }
+    } | ConvertTo-Json -Depth 5
+
+    $tempFile = [System.IO.Path]::GetTempFileName()
+    $apiBody | Set-Content $tempFile -Encoding utf8
+    az rest --method PATCH --url "https://graph.microsoft.com/v1.0/applications/$($appManifest.id)" --body "@$tempFile" --headers "Content-Type=application/json" --output none
+    $apiResult = $LASTEXITCODE
     Remove-Item $tempFile -ErrorAction SilentlyContinue
-    if ($LASTEXITCODE -ne 0) { Write-Warning "Failed to create API scope — configure manually." }
+    if ($apiResult -ne 0) { Write-Warning "Failed to create API scope — configure manually." }
     else { Write-Host "Created scope: $apiUri/access_as_user" -ForegroundColor Green }
 } else {
     Write-Host "API scope 'access_as_user' already exists." -ForegroundColor Green

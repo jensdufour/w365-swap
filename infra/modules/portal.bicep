@@ -17,11 +17,17 @@ param clientId string
 @description('Entra ID app registration client secret.')
 param clientSecret string
 
+// Deterministic per-deployment suffix so globally-unique names (KV, Function
+// App, Storage) don't collide with other Azure tenants/subscriptions that may
+// have squatted the same prefix. Stable per resource group, so re-deploys
+// land on the same names.
+var uniqueSuffix = take(uniqueString(resourceGroup().id), 6)
+
 var staticWebAppName = '${namePrefix}-portal'
-var functionAppName = '${namePrefix}-api'
+var functionAppName = '${namePrefix}-api-${uniqueSuffix}'
 var appServicePlanName = '${namePrefix}-plan'
-var keyVaultName = '${namePrefix}-kv'
-var funcStorageName = replace('stfunc${namePrefix}', '-', '')
+var keyVaultName = '${namePrefix}-kv-${uniqueSuffix}'
+var funcStorageName = toLower(take(replace('stfunc${namePrefix}${uniqueSuffix}', '-', ''), 24))
 var deploymentContainerName = 'app-package'
 
 // ---------------------------------------------------------------------------
