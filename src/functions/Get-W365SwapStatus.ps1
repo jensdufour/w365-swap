@@ -101,12 +101,16 @@ function Get-W365SwapStatus {
 
     # Default: show summary
     $state = Get-SwapState
-    $activeEnvs = @($state.environments | Where-Object { $_.status -eq 'active' })
-    $archivedEnvs = @($state.environments | Where-Object { $_.status -eq 'archived' })
     $pendingOps = @($state.operations | Where-Object { $_.status -eq 'inProgress' })
+    $recentOps  = @($state.operations | Sort-Object -Property startedAt -Descending | Select-Object -First 5)
 
     Write-Host "`nW365 Swap Status Summary:" -ForegroundColor White
-    Write-Host "  Active environments:   $($activeEnvs.Count)" -ForegroundColor Green
-    Write-Host "  Archived environments: $($archivedEnvs.Count)" -ForegroundColor Gray
+    Write-Host "  Tracked operations:    $($state.operations.Count)" -ForegroundColor Gray
     Write-Host "  Pending operations:    $($pendingOps.Count)" -ForegroundColor $(if ($pendingOps.Count -gt 0) { 'Yellow' } else { 'Gray' })
+    if ($recentOps.Count -gt 0) {
+        Write-Host "`nMost recent:" -ForegroundColor White
+        foreach ($op in $recentOps) {
+            Write-Host "  $($op.operationId)  ($($op.type) / $($op.status))" -ForegroundColor Gray
+        }
+    }
 }

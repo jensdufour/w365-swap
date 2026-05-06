@@ -60,74 +60,9 @@ async function restoreCloudPC(request: HttpRequest, context: InvocationContext):
   }
 }
 
-/**
- * POST /api/cloudpcs/:id/power
- * Powers on or off a Cloud PC (Frontline only).
- * 
- * Body:
- *   - action: "start" | "stop"
- */
-async function powerAction(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
-  const token = extractBearerToken(request.headers.get("authorization") ?? undefined);
-  if (!token) {
-    return { status: 401, jsonBody: { error: "Missing or invalid authorization header" } };
-  }
-
-  const cloudPcId = request.params.id;
-  if (!isValidGuid(cloudPcId)) {
-    return { status: 400, jsonBody: { error: "Invalid Cloud PC ID format" } };
-  }
-
-  let body: Record<string, unknown>;
-  try {
-    body = (await request.json()) as Record<string, unknown>;
-  } catch {
-    return { status: 400, jsonBody: { error: "Invalid JSON body" } };
-  }
-
-  const action = body.action as string;
-  if (!action || !["start", "stop"].includes(action)) {
-    return { status: 400, jsonBody: { error: "action must be 'start' or 'stop'" } };
-  }
-
-  try {
-    const client = createOboGraphClient(token);
-
-    await client
-      .api(`/deviceManagement/virtualEndpoint/cloudPCs/${cloudPcId}/${action}`)
-      .version("beta")
-      .post(undefined);
-
-    return {
-      status: 202,
-      jsonBody: {
-        data: {
-          cloudPcId,
-          action,
-          status: "inProgress",
-          message: `${action === "start" ? "Power on" : "Power off"} initiated.`,
-        },
-      },
-    };
-  } catch (error: any) {
-    context.error(`Failed to ${action} Cloud PC:`, error);
-    return {
-      status: error.statusCode || 500,
-      jsonBody: { error: sanitizeErrorMessage(error) },
-    };
-  }
-}
-
 app.http("restoreCloudPC", {
   methods: ["POST"],
   authLevel: "anonymous",
   route: "cloudpcs/{id}/restore",
   handler: restoreCloudPC,
-});
-
-app.http("powerAction", {
-  methods: ["POST"],
-  authLevel: "anonymous",
-  route: "cloudpcs/{id}/power",
-  handler: powerAction,
 });

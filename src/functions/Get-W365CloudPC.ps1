@@ -70,18 +70,5 @@ function Get-W365CloudPC {
         }
     }
 
-    # Enrich with local state
-    try {
-        $state = Get-SwapState
-        foreach ($cpc in $cloudPCs) {
-            $envRecord = $state.environments | Where-Object { $_.cloudPcId -eq $cpc.id } | Select-Object -First 1
-            $cpc | Add-Member -NotePropertyName 'projectName' -NotePropertyValue ($envRecord.projectName ?? 'unassigned') -Force
-            $cpc | Add-Member -NotePropertyName 'swapStatus' -NotePropertyValue ($envRecord.status ?? 'untracked') -Force
-        }
-    }
-    catch {
-        # State file may not exist yet
-    }
-
     return $cloudPCs
 }

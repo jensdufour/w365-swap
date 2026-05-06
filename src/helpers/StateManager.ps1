@@ -2,10 +2,11 @@
 
 <#
 .SYNOPSIS
-    Local state management for W365 Swap environment tracking.
+    Local state for W365 Swap operation tracking.
 .DESCRIPTION
-    Tracks which Cloud PCs are active, archived, and their associated
-    project names and snapshot metadata. State is stored as a JSON file.
+    Tracks asynchronous Graph operations (snapshot/export/import/restore)
+    started by the CLI so users can correlate them later via Get-W365SwapStatus.
+    State is stored as a JSON file scoped to the calling user.
 #>
 
 $script:StateFilePath = $null
@@ -26,7 +27,6 @@ function Initialize-StateFile {
         $initialState = @{
             version      = '1.0'
             lastModified = (Get-Date -Format 'o')
-            environments = @()
             operations   = @()
         }
         $initialState | ConvertTo-Json -Depth 10 | Set-Content -Path $Path -Encoding utf8
@@ -63,57 +63,6 @@ function Save-SwapState {
     $State | ConvertTo-Json -Depth 10 | Set-Content -Path $script:StateFilePath -Encoding utf8
 }
 
-function Add-EnvironmentRecord {
-    <#
-    .SYNOPSIS
-        Adds or updates an environment record in the state.
-    #>
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)]
-        [string]$CloudPcId,
-
-        [Parameter(Mandatory)]
-        [string]$ProjectName,
-
-        [Parameter(Mandatory)]
-        [ValidateSet('active', 'archived', 'importing', 'exporting')]
-        [string]$Status,
-
-        [string]$UserPrincipalName,
-        [string]$BlobPath,
-        [string]$SnapshotId
-    )
-
-    $state = Get-SwapState
-
-    $envList = [System.Collections.ArrayList]@($state.environments)
-
-    $existing = $envList | Where-Object { $_.cloudPcId -eq $CloudPcId -and $_.projectName -eq $ProjectName }
-    if ($existing) {
-        $existing.status = $Status
-        $existing.lastModified = (Get-Date -Format 'o')
-        if ($BlobPath) { $existing.blobPath = $BlobPath }
-        if ($SnapshotId) { $existing.snapshotId = $SnapshotId }
-    }
-    else {
-        $record = @{
-            cloudPcId         = $CloudPcId
-            projectName       = $ProjectName
-            status            = $Status
-            userPrincipalName = $UserPrincipalName
-            blobPath          = $BlobPath
-            snapshotId        = $SnapshotId
-            createdAt         = (Get-Date -Format 'o')
-            lastModified      = (Get-Date -Format 'o')
-        }
-        $envList.Add($record) | Out-Null
-    }
-
-    $state.environments = @($envList)
-    Save-SwapState -State $state
-}
-
 function Add-OperationRecord {
     <#
     .SYNOPSIS
@@ -125,7 +74,7 @@ function Add-OperationRecord {
         [string]$OperationId,
 
         [Parameter(Mandatory)]
-        [ValidateSet('snapshot', 'export', 'import', 'restore', 'reprovision')]
+        [ValidateSet('snapshot', 'export', 'import', 'restore')]
         [string]$Type,
 
         [Parameter(Mandatory)]
@@ -183,19 +132,4 @@ function Update-OperationStatus {
         }
         Save-SwapState -State $state
     }
-}
-
-function Get-EnvironmentsByUser {
-    <#
-    .SYNOPSIS
-        Returns all environment records for a given user.
-    #>
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)]
-        [string]$UserPrincipalName
-    )
-
-    $state = Get-SwapState
-    return $state.environments | Where-Object { $_.userPrincipalName -eq $UserPrincipalName }
 }

@@ -15,10 +15,8 @@
         'New-W365Snapshot'
         'Export-W365Environment'
         'Import-W365Environment'
-        'Switch-W365Environment'
         'Restore-W365Environment'
         'Get-W365SwapStatus'
-        'Remove-W365ArchivedEnvironment'
     )
 
     CmdletsToExport   = @()

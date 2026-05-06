@@ -127,8 +127,11 @@ New-W365Snapshot -CloudPcId "<id>" -Label "pre-refactor"
 # 5. Export environment to storage for archival
 Export-W365Environment -CloudPcId "<id>" -ProjectName "project-alpha" -StorageAccountId "<storageId>"
 
-# 6. Import archived environment
-Import-W365Environment -ProjectName "project-alpha" -UserId "<userId>" -StorageAccountId "<storageId>"
+# 6. Import an archived environment (look up the actual container + blob name first;
+#    Windows 365 writes to a service-managed `windows365-share-ent-*` container)
+Import-W365Environment -UserId "<userId>" -StorageAccountId "<storageId>" `
+    -ContainerName "windows365-share-ent-<suffix>" `
+    -BlobName "CPC_<cloudPcId>_<guid>.vhd"
 
 # 7. Check operation status
 Get-W365SwapStatus -OperationId "<id>"
@@ -188,12 +191,12 @@ w365-swap/
 ├── src/                         # PowerShell CLI module
 │   ├── W365Swap.psm1
 │   ├── W365Swap.psd1
-│   ├── functions/               # 9 public cmdlets
+│   ├── functions/               # 7 public cmdlets
 │   └── helpers/
 │       ├── GraphApi.ps1         # Token cache + Graph REST
-│       └── StateManager.ps1     # Local JSON state tracking
+│       └── StateManager.ps1     # Local JSON operation log
 ├── tests/
-│   └── W365Swap.Tests.ps1      # Pester v3 tests (10 passing)
+│   └── W365Swap.Tests.ps1      # Pester v3 tests
 ├── .env.example                 # CLI-only environment template
 ├── .gitignore
 ├── LICENSE

@@ -25,10 +25,8 @@ Describe 'Module Loading' {
             'New-W365Snapshot'
             'Export-W365Environment'
             'Import-W365Environment'
-            'Switch-W365Environment'
             'Restore-W365Environment'
             'Get-W365SwapStatus'
-            'Remove-W365ArchivedEnvironment'
         )
 
         $exportedFunctions = (Get-Module 'W365Swap').ExportedFunctions.Keys
@@ -37,9 +35,9 @@ Describe 'Module Loading' {
         }
     }
 
-    It 'Should export exactly 9 functions' {
+    It 'Should export exactly 7 functions' {
         $exportedFunctions = (Get-Module 'W365Swap').ExportedFunctions.Keys
-        $exportedFunctions.Count | Should Be 9
+        $exportedFunctions.Count | Should Be 7
     }
 }
 
@@ -57,32 +55,6 @@ Describe 'State Manager' {
         Test-Path $script:testStatePath | Should Be $true
         $state = Get-Content $script:testStatePath -Raw | ConvertFrom-Json
         $state.version | Should Be '1.0'
-    }
-
-    It 'Should add an environment record' {
-        InModuleScope 'W365Swap' {
-            Add-EnvironmentRecord -CloudPcId 'test-cpc-1' -ProjectName 'test-project' `
-                -Status 'active' -UserPrincipalName 'test@contoso.com'
-            $state = Get-SwapState
-            $record = $state.environments | Where-Object { $_.cloudPcId -eq 'test-cpc-1' }
-            $record | Should Not BeNullOrEmpty
-            $record.projectName | Should Be 'test-project'
-            $record.status | Should Be 'active'
-        }
-    }
-
-    It 'Should update an existing environment record' {
-        InModuleScope 'W365Swap' {
-            Add-EnvironmentRecord -CloudPcId 'test-cpc-1' -ProjectName 'test-project' `
-                -Status 'active' -UserPrincipalName 'test@contoso.com'
-            Add-EnvironmentRecord -CloudPcId 'test-cpc-1' -ProjectName 'test-project' `
-                -Status 'archived' -UserPrincipalName 'test@contoso.com' -BlobPath 'snapshots/test.vhd'
-            $state = Get-SwapState
-            $envs = @($state.environments | Where-Object { $_.cloudPcId -eq 'test-cpc-1' })
-            $envs.Count | Should Be 1
-            $envs[0].status | Should Be 'archived'
-            $envs[0].blobPath | Should Be 'snapshots/test.vhd'
-        }
     }
 
     It 'Should add an operation record' {
@@ -109,15 +81,14 @@ Describe 'State Manager' {
         }
     }
 
-    It 'Should filter environments by user' {
+    It 'Should cap operations to the 100 most recent' {
         InModuleScope 'W365Swap' {
-            Add-EnvironmentRecord -CloudPcId 'cpc-a' -ProjectName 'proj-1' `
-                -Status 'active' -UserPrincipalName 'user1@contoso.com'
-            Add-EnvironmentRecord -CloudPcId 'cpc-b' -ProjectName 'proj-2' `
-                -Status 'active' -UserPrincipalName 'user2@contoso.com'
-            $user1Envs = Get-EnvironmentsByUser -UserPrincipalName 'user1@contoso.com'
-            @($user1Envs).Count | Should Be 1
-            $user1Envs.cloudPcId | Should Be 'cpc-a'
+            for ($i = 1; $i -le 105; $i++) {
+                Add-OperationRecord -OperationId "op-$i" -Type 'snapshot' `
+                    -CloudPcId 'test-cpc-1' -ProjectName 'test'
+            }
+            $state = Get-SwapState
+            @($state.operations).Count | Should Be 100
         }
     }
 

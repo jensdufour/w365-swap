@@ -12,62 +12,50 @@ function Import-W365Environment {
         IMPORTANT: This does NOT swap the disk of an existing Cloud PC.
         It creates a new Cloud PC. The user must have an available W365 license.
         Provisioning typically takes 15-45 minutes.
-    .PARAMETER ProjectName
-        The project name to look up in the state file for the VHD path.
+
+        Note on naming: VHDs produced by Export-W365Environment land in a
+        Windows-365-managed container called `windows365-share-ent-<suffix>`
+        with a service-chosen name `CPC_<cloudPcId>_<guid>.vhd`. You must
+        supply both the actual ContainerName and the actual BlobName here.
+        Locate them via the Azure portal, az cli, or the W365 Swap web portal.
     .PARAMETER UserId
         The Entra ID user ID to assign the imported Cloud PC to.
     .PARAMETER StorageAccountId
         Azure resource ID of the storage account containing the VHD.
     .PARAMETER ContainerName
-        Blob container name. Default: snapshots.
+        Blob container name (e.g. `windows365-share-ent-abc123`).
     .PARAMETER BlobName
-        Full blob name of the VHD file. If omitted, resolved from state file.
+        Full blob name of the VHD file (e.g. `CPC_<id>_<guid>.vhd`).
     .PARAMETER GuestStateBlobName
-        Optional blob name for the VM guest state file.
+        Optional blob name for the VM guest state file (.vmgs). Required for
+        Gen2 VHDs you uploaded yourself; not produced by createSnapshot.
     .EXAMPLE
-        Import-W365Environment -ProjectName "project-alpha" -UserId "user-guid" -StorageAccountId $storageId
-    .EXAMPLE
-        Import-W365Environment -UserId "user-guid" -StorageAccountId $storageId -ContainerName "snapshots" -BlobName "dev_contoso_com/project-alpha/20260413.vhd"
+        Import-W365Environment -UserId "user-guid" -StorageAccountId $storageId `
+            -ContainerName "windows365-share-ent-abc123" `
+            -BlobName "CPC_4b5ad5e0-6a0b-4ffc-818d-36bb23cf4dbd_xxx.vhd"
     #>
     [CmdletBinding(SupportsShouldProcess)]
     param(
-        [string]$ProjectName,
-
         [Parameter(Mandatory)]
         [string]$UserId,
 
         [Parameter(Mandatory)]
         [string]$StorageAccountId,
 
-        [string]$ContainerName = 'snapshots',
+        [Parameter(Mandatory)]
+        [string]$ContainerName,
+
+        [Parameter(Mandatory)]
         [string]$BlobName,
+
         [string]$GuestStateBlobName
     )
-
-    # Resolve blob name from state if not specified
-    if (-not $BlobName -and $ProjectName) {
-        $state = Get-SwapState
-        $envRecord = $state.environments | Where-Object {
-            $_.projectName -eq $ProjectName -and $_.status -eq 'archived'
-        } | Sort-Object -Property lastModified -Descending | Select-Object -First 1
-
-        if (-not $envRecord) {
-            throw "No archived environment found for project '$ProjectName'. Specify -BlobName explicitly."
-        }
-
-        $BlobName = $envRecord.blobPath -replace '^snapshots/', ''
-        Write-Host "Resolved VHD from state: $BlobName" -ForegroundColor Gray
-    }
-
-    if (-not $BlobName) {
-        throw 'Either -ProjectName (with archived state) or -BlobName must be specified.'
-    }
 
     if (-not $PSCmdlet.ShouldProcess($BlobName, "Import VHD and provision Cloud PC for user $UserId")) {
         return
     }
 
-    Write-Host "Importing VHD '$BlobName' for user $UserId..." -ForegroundColor Cyan
+    Write-Host "Importing VHD '$BlobName' from container '$ContainerName' for user $UserId..." -ForegroundColor Cyan
     Write-Host "This will provision a NEW Cloud PC. Estimated time: 15-45 minutes." -ForegroundColor Yellow
 
     $sourceFiles = @(
@@ -108,22 +96,15 @@ function Import-W365Environment {
         throw
     }
 
-    # Track in state
     $operationId = New-OperationId -Type 'import'
-    Add-OperationRecord -OperationId $operationId -Type 'import' -CloudPcId 'pending' -ProjectName ($ProjectName ?? $BlobName)
-
-    if ($ProjectName) {
-        Add-EnvironmentRecord -CloudPcId 'pending' -ProjectName $ProjectName `
-            -Status 'importing' -UserPrincipalName ($result.assignedUserPrincipalName ?? '') `
-            -BlobPath "$ContainerName/$BlobName"
-    }
+    Add-OperationRecord -OperationId $operationId -Type 'import' -CloudPcId 'pending' -ProjectName $BlobName
 
     Write-Host "Import initiated. Operation: $operationId" -ForegroundColor Green
     Write-Host "Import status: $($result.importStatus)" -ForegroundColor Gray
     Write-Host "Policy: $($result.policyName)" -ForegroundColor Gray
 
     return @{
-        operationId = $operationId
+        operationId  = $operationId
         importResult = $result
         status       = $result.importStatus
     }

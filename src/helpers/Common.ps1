@@ -17,7 +17,7 @@ function New-OperationId {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
-        [ValidateSet('snapshot', 'export', 'import', 'restore', 'reprovision')]
+        [ValidateSet('snapshot', 'export', 'import', 'restore')]
         [string]$Type,
 
         [string]$CloudPcId
