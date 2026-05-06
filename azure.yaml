@@ -1,7 +1,7 @@
 # yaml-language-server: $schema=https://raw.githubusercontent.com/Azure/azure-dev/main/schemas/v1.0/azure.yaml.json
-name: w365-swap
+name: mosaic
 metadata:
-  template: w365-swap@0.1.0
+  template: mosaic@0.1.0
 
 hooks:
   preprovision:
