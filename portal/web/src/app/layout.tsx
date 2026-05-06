@@ -3,8 +3,8 @@ import "./globals.css";
 import { AuthProvider } from "@/components/AuthProvider";
 
 export const metadata: Metadata = {
-  title: "W365 Swap Portal",
-  description: "Manage Windows 365 Cloud PC development environments",
+  title: "Mosaic",
+  description: "User-state vault for Windows 365 Cloud PCs",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

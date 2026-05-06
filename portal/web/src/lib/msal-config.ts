@@ -1,12 +1,15 @@
 import { Configuration, LogLevel } from "@azure/msal-browser";
 
 /**
- * MSAL configuration for W365 Swap portal.
- * 
- * Required Entra ID App Registration:
- *   - SPA redirect URI: http://localhost:3000 (dev), https://your-swa.azurestaticapps.net (prod)
- *   - API permissions: CloudPC.ReadWrite.All (delegated)
- *   - Expose an API: api://{clientId} with scope "access_as_user"
+ * MSAL configuration for the Mosaic portal.
+ *
+ * Required Entra ID app registration:
+ *   - SPA redirect URI: http://localhost:3000 (dev), the SWA URL (prod),
+ *     plus any custom domains (declared in azd via AZURE_EXTRA_REDIRECT_URIS).
+ *   - Expose an API: api://{clientId} with scope "access_as_user".
+ *
+ * Mosaic does not call Microsoft Graph from the portal in MVP — all backend
+ * traffic is to our own Catalog API.
  */
 export const msalConfig: Configuration = {
   auth: {
@@ -29,12 +32,7 @@ export const msalConfig: Configuration = {
   },
 };
 
-/** Scopes for acquiring tokens to call our API backend (OBO flow). */
+/** Scopes for acquiring tokens to call the Mosaic Catalog API (OBO flow). */
 export const apiScopes = [
   `api://${process.env.NEXT_PUBLIC_AZURE_CLIENT_ID}/access_as_user`,
-];
-
-/** Scopes for direct Graph calls (if needed from frontend). */
-export const graphScopes = [
-  "https://graph.microsoft.com/CloudPC.ReadWrite.All",
 ];

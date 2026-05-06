@@ -1,6 +1,6 @@
 {
-  "name": "w365-swap-portal",
-  "version": "0.1.0",
+  "name": "mosaic-portal",
+  "version": "0.0.0",
   "private": true,
   "scripts": {
     "dev": "next dev",

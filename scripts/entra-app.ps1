@@ -44,9 +44,9 @@ if (-not $envName) { throw "AZURE_ENV_NAME not set. Run 'azd env new' first." }
 $tenantId = (az account show --query tenantId -o tsv)
 Set-AzdEnv 'AZURE_TENANT_ID' $tenantId
 
-Write-Host "`n=== W365 Swap — Entra ID App Registration ===" -ForegroundColor Cyan
+Write-Host "`n=== Mosaic — Entra ID App Registration ===" -ForegroundColor Cyan
 
-$appDisplayName = "W365 Swap ($envName)"
+$appDisplayName = "Mosaic ($envName)"
 
 # ---------------------------------------------------------------------------
 # Create or locate existing app registration
@@ -172,21 +172,12 @@ if (-not $existingScope) {
             oauth2PermissionScopes = @(
                 @{
                     id                      = $scopeId
-                    adminConsentDescription = 'Access W365 Swap API on behalf of the user'
-                    adminConsentDisplayName = 'Access W365 Swap API'
-                    isEnabled               = $true
-                    type                    = 'User'
-                    userConsentDescription  = 'Access W365 Swap API on your behalf'
-                    userConsentDisplayName  = 'Access W365 Swap API'
-                    value                   = 'access_as_user'
-                }
-            )
-        }
-    } | ConvertTo-Json -Depth 5
-
-    $tempFile = [System.IO.Path]::GetTempFileName()
-    $apiBody | Set-Content $tempFile -Encoding utf8
-    az rest --method PATCH --url "https://graph.microsoft.com/v1.0/applications/$($appManifest.id)" --body "@$tempFile" --output none
+                        adminConsentDescription = 'Access the Mosaic API on behalf of the user'
+                        adminConsentDisplayName = 'Access Mosaic API'
+                        isEnabled               = $true
+                        type                    = 'User'
+                        userConsentDescription  = 'Access the Mosaic API on your behalf'
+                        userConsentDisplayName  = 'Access Mosaic API'
     Remove-Item $tempFile -ErrorAction SilentlyContinue
     if ($LASTEXITCODE -ne 0) { Write-Warning "Failed to create API scope — configure manually." }
     else { Write-Host "Created scope: $apiUri/access_as_user" -ForegroundColor Green }
@@ -204,11 +195,13 @@ Write-Host "Configuring API permissions..." -ForegroundColor Cyan
 $graphAppId = '00000003-0000-0000-c000-000000000000'
 
 # Permission IDs (well-known):
-#   CloudPC.ReadWrite.All = 9d77138f-f0e2-47ba-ab33-cd246c8b79d1
-#   User.Read             = e1fe6dd8-ba31-4d61-89e7-88639da4683d
+#   User.Read = e1fe6dd8-ba31-4d61-89e7-88639da4683d
+#
+# Mosaic's API does not call Graph for Cloud PC management; the agent uses
+# native broker auth and the API only validates JWTs. Only User.Read is
+# required so the portal can show the signed-in user's name.
 
 $requiredPermissions = @(
-    @{ id = '9d77138f-f0e2-47ba-ab33-cd246c8b79d1'; type = 'Scope' }  # CloudPC.ReadWrite.All
     @{ id = 'e1fe6dd8-ba31-4d61-89e7-88639da4683d'; type = 'Scope' }  # User.Read
 )
 

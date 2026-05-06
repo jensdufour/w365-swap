@@ -3,7 +3,6 @@
 import { useIsAuthenticated, useMsal } from "@azure/msal-react";
 import { InteractionStatus } from "@azure/msal-browser";
 import { apiScopes } from "@/lib/msal-config";
-import { CloudPCDashboard } from "@/components/CloudPCDashboard";
 
 export default function Home() {
   const { instance, inProgress } = useMsal();
@@ -30,13 +29,11 @@ export default function Home() {
       <div className="min-h-screen flex items-center justify-center">
         <div className="max-w-md w-full bg-white rounded-xl shadow-lg p-8 text-center">
           <div className="mb-6">
-            <h1 className="text-3xl font-bold text-gray-900">W365 Swap</h1>
-            <p className="mt-2 text-gray-600">
-              Manage your Windows 365 development environments
-            </p>
+            <h1 className="text-3xl font-bold text-gray-900">Mosaic</h1>
+            <p className="mt-2 text-gray-600">User-state vault for Windows 365</p>
           </div>
           <p className="text-sm text-gray-500 mb-6">
-            Sign in with your organization account to view and manage your Cloud PC environments.
+            Sign in with your organization account to manage your saved states.
           </p>
           <button
             onClick={handleLogin}
@@ -44,9 +41,7 @@ export default function Home() {
           >
             Sign in with Microsoft
           </button>
-          <p className="mt-4 text-xs text-amber-600">
-            ⚠ Uses Microsoft Graph Beta APIs — not supported for production use
-          </p>
+          <p className="mt-4 text-xs text-amber-600">Pre-release — v0 in active development.</p>
         </div>
       </div>
     );
@@ -56,12 +51,11 @@ export default function Home() {
 
   return (
     <div className="min-h-screen">
-      {/* Header bar — mirrors Dev Box portal header */}
       <header className="bg-white border-b border-gray-200 px-6 py-3 flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <h1 className="text-xl font-semibold text-gray-900">W365 Swap</h1>
+          <h1 className="text-xl font-semibold text-gray-900">Mosaic</h1>
           <span className="text-xs bg-amber-100 text-amber-800 px-2 py-0.5 rounded-full font-medium">
-            Beta
+            v0
           </span>
         </div>
         <div className="flex items-center gap-4">
@@ -75,9 +69,17 @@ export default function Home() {
         </div>
       </header>
 
-      {/* Main content */}
-      <main className="max-w-7xl mx-auto px-6 py-8">
-        <CloudPCDashboard />
+      <main className="max-w-3xl mx-auto px-6 py-16 text-center">
+        <h2 className="text-2xl font-semibold text-gray-900">No states yet</h2>
+        <p className="mt-3 text-gray-600">
+          Mosaic captures and restores your Windows 365 user state — files, settings,
+          dev tooling — across sessions and SKUs. The agent and catalog API for v0
+          are still being built; this portal is a placeholder.
+        </p>
+        <p className="mt-6 text-sm text-gray-500">
+          Once the agent ships, install it on your Cloud PC and your saved states
+          will appear here.
+        </p>
       </main>
     </div>
   );

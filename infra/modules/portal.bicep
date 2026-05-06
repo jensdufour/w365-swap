@@ -7,12 +7,6 @@ param location string
 @description('Tags to apply to all resources.')
 param tags object = {}
 
-@description('Storage account resource ID for VHD archival.')
-param storageAccountId string
-
-@description('Storage account name for VHD archival (used for RBAC scope).')
-param storageAccountName string
-
 @description('Entra ID tenant ID for authentication.')
 param tenantId string
 
@@ -138,7 +132,6 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
         { name: 'WEBSITE_NODE_DEFAULT_VERSION', value: '~20' }
         // Required for the Node v4 programming model (app.http(...) in code)
         { name: 'AzureWebJobsFeatureFlags', value: 'EnableWorkerIndexing' }
-        { name: 'STORAGE_ACCOUNT_ID', value: storageAccountId }
         { name: 'SCM_DO_BUILD_DURING_DEPLOYMENT', value: 'true' }
         { name: 'ENABLE_ORYX_BUILD', value: 'true' }
       ]
@@ -212,23 +205,6 @@ resource storageTableRoleAssignment 'Microsoft.Authorization/roleAssignments@202
   scope: funcStorage
   properties: {
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3')
-    principalId: functionApp.identity.principalId
-    principalType: 'ServicePrincipal'
-  }
-}
-
-// Reference the snapshots storage account to scope an RBAC assignment
-resource snapshotsStorage 'Microsoft.Storage/storageAccounts@2023-05-01' existing = {
-  name: storageAccountName
-}
-
-// Grant the Function App identity Storage Blob Data Contributor on snapshots storage
-// Required so the API can list / read / write VHD blobs in the 'snapshots' container.
-resource snapshotsBlobRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(snapshotsStorage.id, functionAppName, 'Storage Blob Data Contributor')
-  scope: snapshotsStorage
-  properties: {
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'ba92f5b4-2d11-453d-a403-e96b0029c9fe')
     principalId: functionApp.identity.principalId
     principalType: 'ServicePrincipal'
   }

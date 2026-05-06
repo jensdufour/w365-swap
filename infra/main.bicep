@@ -6,7 +6,7 @@ targetScope = 'subscription'
 
 @minLength(1)
 @maxLength(64)
-@description('Name prefix for all resources (e.g. w365swap).')
+@description('Name prefix for all resources (e.g. mosaic).')
 param namePrefix string
 
 @minLength(1)
@@ -35,7 +35,7 @@ resource rg 'Microsoft.Resources/resourceGroups@2024-03-01' = {
   location: location
   tags: union(tags, {
     'azd-env-name': namePrefix
-    project: 'w365-swap'
+    project: 'mosaic'
     'sfi-compliance': 'reviewed'
     'data-classification': 'confidential'
   })
@@ -56,23 +56,6 @@ module networking 'modules/networking.bicep' = {
 }
 
 // ---------------------------------------------------------------------------
-// Storage Account — VHD snapshot archival with lifecycle tiering
-// ---------------------------------------------------------------------------
-
-module storage 'modules/storage-account.bicep' = {
-  name: 'storage'
-  scope: rg
-  params: {
-    storageAccountName: replace('st${namePrefix}', '-', '')
-    location: location
-    tags: rg.tags
-    allowedSubnetIds: [
-      networking.outputs.integrationSubnetId
-    ]
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Portal — Key Vault, Functions App, Static Web App
 // ---------------------------------------------------------------------------
 
@@ -83,8 +66,6 @@ module portal 'modules/portal.bicep' = {
     namePrefix: namePrefix
     location: location
     tags: rg.tags
-    storageAccountId: storage.outputs.storageAccountId
-    storageAccountName: storage.outputs.storageAccountName
     tenantId: tenantId
     clientId: clientId
     clientSecret: clientSecret
@@ -99,9 +80,6 @@ module portal 'modules/portal.bicep' = {
 // ---------------------------------------------------------------------------
 
 output AZURE_RESOURCE_GROUP string = rg.name
-output AZURE_STORAGE_ACCOUNT_NAME string = storage.outputs.storageAccountName
-output AZURE_STORAGE_BLOB_ENDPOINT string = storage.outputs.primaryBlobEndpoint
-output AZURE_STORAGE_ACCOUNT_ID string = storage.outputs.storageAccountId
 output AZURE_STATIC_WEB_APP_URL string = portal.outputs.staticWebAppUrl
 output AZURE_STATIC_WEB_APP_NAME string = portal.outputs.staticWebAppName
 output AZURE_FUNCTION_APP_URL string = portal.outputs.functionAppUrl

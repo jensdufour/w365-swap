@@ -1,7 +1,7 @@
 {
-  "name": "w365-swap-api",
-  "version": "0.1.0",
-  "description": "Azure Functions API backend for W365 Swap portal",
+  "name": "mosaic-api",
+  "version": "0.0.0",
+  "description": "Azure Functions API backend for the Mosaic catalog service",
   "private": true,
   "main": "dist/functions/*.js",
   "engines": {
@@ -15,9 +15,7 @@
   "dependencies": {
     "@azure/functions": "^4.5.0",
     "@azure/identity": "^4.5.0",
-    "@azure/storage-blob": "^12.31.0",
-    "@microsoft/microsoft-graph-client": "^3.0.7",
-    "isomorphic-fetch": "^3.0.0"
+    "@azure/storage-blob": "^12.31.0"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

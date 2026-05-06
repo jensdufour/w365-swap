@@ -2,12 +2,14 @@
 
 <#
 .SYNOPSIS
-    Post-provision hook: patches redirect URI, assigns RBAC, and writes local config.
+    Post-provision hook: patches redirect URIs and writes local config.
 .DESCRIPTION
     Runs after azd provision. Uses Bicep outputs (now in azd env) to:
-    1. Add the production SWA URL as a SPA redirect URI on the app registration
-    2. Assign Storage Blob Data Contributor to the Function App managed identity
-    3. Write portal/.env with correct values for local development
+    1. Add the production SWA URL (and any AZURE_EXTRA_REDIRECT_URIS) as SPA
+       redirect URIs on the app registration, merging with whatever is already
+       configured so manually-added entries (e.g. custom domains) survive.
+    2. Write portal/.env, portal/web/.env, and portal/api/local.settings.json
+       for local development.
 #>
 
 $ErrorActionPreference = 'Stop'
@@ -25,13 +27,12 @@ function Get-AzdEnv([string]$Key) {
 $clientId       = Get-AzdEnv 'AZURE_CLIENT_ID'
 $tenantId       = Get-AzdEnv 'AZURE_TENANT_ID'
 $swaUrl         = Get-AzdEnv 'AZURE_STATIC_WEB_APP_URL'
-$storageId      = Get-AzdEnv 'AZURE_STORAGE_ACCOUNT_ID'
 $functionAppName = Get-AzdEnv 'AZURE_FUNCTION_APP_NAME'
 $resourceGroup  = Get-AzdEnv 'AZURE_RESOURCE_GROUP'
 
 if (-not $swaUrl) { throw "AZURE_STATIC_WEB_APP_URL not found in azd env — was provision successful?" }
 
-Write-Host "`n=== W365 Swap — Post-Provision ===" -ForegroundColor Cyan
+Write-Host "`n=== Mosaic — Post-Provision ===" -ForegroundColor Cyan
 
 # ---------------------------------------------------------------------------
 # 1. Patch SPA redirect URIs with production SWA URL + any extras
@@ -83,106 +84,7 @@ if ($missing) {
 }
 
 # ---------------------------------------------------------------------------
-# 2. Assign Storage Blob Data Contributor to Function App identity
-# ---------------------------------------------------------------------------
-
-Write-Host "Assigning Storage Blob Data Contributor to Function App..." -ForegroundColor Cyan
-
-# Get Function App managed identity principal ID
-$funcApp = az functionapp identity show --name $functionAppName --resource-group $resourceGroup --output json 2>$null | ConvertFrom-Json
-if ($funcApp -and $funcApp.principalId) {
-    $principalId = $funcApp.principalId
-
-    # Storage Blob Data Contributor role ID
-    $roleDef = 'ba92f5b4-2d11-453d-a403-e96b0029c9fe'
-
-    $existing = az role assignment list `
-        --assignee $principalId `
-        --role $roleDef `
-        --scope $storageId `
-        --query "[0]" 2>$null | ConvertFrom-Json
-
-    if (-not $existing) {
-        az role assignment create `
-            --assignee-object-id $principalId `
-            --assignee-principal-type ServicePrincipal `
-            --role $roleDef `
-            --scope $storageId `
-            --output none
-        if ($LASTEXITCODE -eq 0) {
-            Write-Host "RBAC assigned: Storage Blob Data Contributor" -ForegroundColor Green
-        } else {
-            Write-Warning "Failed to assign storage RBAC — assign manually."
-        }
-    } else {
-        Write-Host "RBAC assignment already exists." -ForegroundColor Green
-    }
-} else {
-    Write-Warning "Could not retrieve Function App identity — assign storage RBAC manually."
-}
-
-# ---------------------------------------------------------------------------
-# 2b. Assign RBAC to Windows 365 service principal on snapshots storage
-# ---------------------------------------------------------------------------
-# Required so the Cloud PC service can WRITE exported VHDs to customer storage.
-# Without these roles, POST /createSnapshot returns 204 but the export silently
-# fails and no blob ever appears in the snapshots container.
-#
-# Windows 365 first-party app ID: 0af06dc6-e4b5-4f28-818e-e78e62d137a5
-
-Write-Host "Assigning RBAC to Windows 365 service principal on snapshots storage..." -ForegroundColor Cyan
-
-$w365AppId = '0af06dc6-e4b5-4f28-818e-e78e62d137a5'
-
-# Ensure the SP exists in this tenant (first-party apps may not be materialized)
-$w365Sp = az ad sp show --id $w365AppId --output json 2>$null | ConvertFrom-Json
-if (-not $w365Sp) {
-    Write-Host "Windows 365 SP not present in tenant — creating..." -ForegroundColor Yellow
-    az ad sp create --id $w365AppId --output none 2>$null
-    Start-Sleep -Seconds 5
-    $w365Sp = az ad sp show --id $w365AppId --output json 2>$null | ConvertFrom-Json
-}
-
-if ($w365Sp -and $w365Sp.id) {
-    $w365ObjectId = $w365Sp.id
-
-    # Windows 365 needs both Storage Account Contributor (for management operations
-    # like tier / lease) AND Storage Blob Data Contributor (for blob I/O).
-    $roles = @{
-        'Storage Account Contributor'    = '17d1049b-9a84-46fb-8f53-869881c3d3ab'
-        'Storage Blob Data Contributor'  = 'ba92f5b4-2d11-453d-a403-e96b0029c9fe'
-    }
-
-    foreach ($roleName in $roles.Keys) {
-        $roleDef = $roles[$roleName]
-        $existing = az role assignment list `
-            --assignee $w365ObjectId `
-            --role $roleDef `
-            --scope $storageId `
-            --query "[0]" 2>$null | ConvertFrom-Json
-
-        if (-not $existing) {
-            az role assignment create `
-                --assignee-object-id $w365ObjectId `
-                --assignee-principal-type ServicePrincipal `
-                --role $roleDef `
-                --scope $storageId `
-                --output none
-            if ($LASTEXITCODE -eq 0) {
-                Write-Host "  RBAC assigned: $roleName -> Windows 365" -ForegroundColor Green
-            } else {
-                Write-Warning "  Failed to assign '$roleName' to Windows 365 SP — assign manually."
-            }
-        } else {
-            Write-Host "  Already assigned: $roleName" -ForegroundColor Green
-        }
-    }
-} else {
-    Write-Warning "Could not resolve Windows 365 service principal — Save Swap exports will fail. Assign 'Storage Account Contributor' and 'Storage Blob Data Contributor' to app $w365AppId on the snapshots storage account manually."
-}
-
-# ---------------------------------------------------------------------------
-# 3. Write portal .env for local development
+# 2. Write portal .env for local development
 # ---------------------------------------------------------------------------
 
 Write-Host "Writing portal/.env for local development..." -ForegroundColor Cyan
@@ -193,7 +95,6 @@ $portalEnvContent = @"
 NEXT_PUBLIC_AZURE_TENANT_ID="$tenantId"
 NEXT_PUBLIC_AZURE_CLIENT_ID="$clientId"
 NEXT_PUBLIC_API_BASE_URL="/api"
-NEXT_PUBLIC_STORAGE_ACCOUNT_ID="$storageId"
 
 # API Backend (Azure Functions local settings)
 AZURE_TENANT_ID="$tenantId"
@@ -210,7 +111,6 @@ $webEnvContent = @"
 NEXT_PUBLIC_AZURE_TENANT_ID="$tenantId"
 NEXT_PUBLIC_AZURE_CLIENT_ID="$clientId"
 NEXT_PUBLIC_API_BASE_URL="/api"
-NEXT_PUBLIC_STORAGE_ACCOUNT_ID="$storageId"
 "@
 $webEnvContent | Set-Content $webEnvPath -Encoding utf8
 Write-Host "Written: portal/web/.env" -ForegroundColor Green
@@ -226,7 +126,6 @@ $localSettings = @{
         AZURE_TENANT_ID            = $tenantId
         AZURE_CLIENT_ID            = $clientId
         AZURE_CLIENT_SECRET        = (Get-AzdEnv 'AZURE_CLIENT_SECRET')
-        STORAGE_ACCOUNT_ID         = $storageId
     }
 } | ConvertTo-Json -Depth 3
 $localSettings | Set-Content $localSettingsPath -Encoding utf8
@@ -239,7 +138,6 @@ Write-Host "Written: portal/api/local.settings.json" -ForegroundColor Green
 Write-Host "`n=== Post-provision complete ===" -ForegroundColor Cyan
 Write-Host "Portal URL:    $swaUrl"
 Write-Host "Function App:  $(Get-AzdEnv 'AZURE_FUNCTION_APP_URL')"
-Write-Host "Storage:       $(Get-AzdEnv 'AZURE_STORAGE_ACCOUNT_NAME')"
 Write-Host "Key Vault:     $(Get-AzdEnv 'AZURE_KEY_VAULT_NAME')"
 Write-Host ""
 Write-Host "Local dev files written:" -ForegroundColor DarkGray
