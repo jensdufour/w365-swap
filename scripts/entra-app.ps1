@@ -161,38 +161,60 @@ $apiUri = "api://$clientId"
 # Set Application ID URI
 az ad app update --id $clientId --identifier-uris $apiUri --output none 2>$null
 
-# Check if scope already exists
+# Pre-authorized applications: client apps that can request our exposed scope
+# without a user consent prompt. Includes Azure CLI (for `az account
+# get-access-token` smoke tests + CI) and the SPA itself (the SPA's clientId
+# is the same as ours, since it's a single-app design — but we still list it
+# explicitly for clarity in the manifest).
+$cliClientId = '04b07795-8ddb-461a-bbee-02f9e1bf7b46'   # Microsoft Azure CLI
+$preAuthorizedClients = @($cliClientId, $clientId) | Sort-Object -Unique
+
+# Re-fetch latest manifest
 $appManifest = az ad app show --id $clientId --output json | ConvertFrom-Json
 $existingScope = $appManifest.api.oauth2PermissionScopes | Where-Object { $_.value -eq 'access_as_user' }
 
-if (-not $existingScope) {
-    $scopeId = [guid]::NewGuid().ToString()
-    $apiBody = @{
-        api = @{
-            oauth2PermissionScopes = @(
-                @{
-                    id                      = $scopeId
-                    adminConsentDescription = 'Access the Mosaic API on behalf of the user'
-                    adminConsentDisplayName = 'Access Mosaic API'
-                    isEnabled               = $true
-                    type                    = 'User'
-                    userConsentDescription  = 'Access the Mosaic API on your behalf'
-                    userConsentDisplayName  = 'Access Mosaic API'
-                    value                   = 'access_as_user'
-                }
-            )
-        }
-    } | ConvertTo-Json -Depth 5
+# Determine scope id (reuse existing, otherwise mint a new one)
+$scopeId = if ($existingScope) { $existingScope.id } else { [guid]::NewGuid().ToString() }
 
-    $tempFile = [System.IO.Path]::GetTempFileName()
-    $apiBody | Set-Content $tempFile -Encoding utf8
-    az rest --method PATCH --url "https://graph.microsoft.com/v1.0/applications/$($appManifest.id)" --body "@$tempFile" --headers "Content-Type=application/json" --output none
-    $apiResult = $LASTEXITCODE
-    Remove-Item $tempFile -ErrorAction SilentlyContinue
-    if ($apiResult -ne 0) { Write-Warning "Failed to create API scope — configure manually." }
-    else { Write-Host "Created scope: $apiUri/access_as_user" -ForegroundColor Green }
+# Build the full api block. Note: PATCH on `api` is a full replace, so we
+# must include scopes + preAuthorizedApplications + requestedAccessTokenVersion
+# together. requestedAccessTokenVersion=2 is required because lib/auth.ts
+# validates the v2 issuer (login.microsoftonline.com/{tid}/v2.0).
+$apiBlock = @{
+    requestedAccessTokenVersion = 2
+    oauth2PermissionScopes      = @(
+        @{
+            id                      = $scopeId
+            adminConsentDescription = 'Access the Mosaic API on behalf of the signed-in user'
+            adminConsentDisplayName = 'Access Mosaic API'
+            isEnabled               = $true
+            type                    = 'User'
+            userConsentDescription  = 'Access the Mosaic API on your behalf'
+            userConsentDisplayName  = 'Access Mosaic API'
+            value                   = 'access_as_user'
+        }
+    )
+    preAuthorizedApplications   = @(
+        foreach ($appId in $preAuthorizedClients) {
+            @{
+                appId         = $appId
+                delegatedPermissionIds = @($scopeId)
+            }
+        }
+    )
+}
+
+$apiBody = @{ api = $apiBlock } | ConvertTo-Json -Depth 6
+
+$tempFile = [System.IO.Path]::GetTempFileName()
+$apiBody | Set-Content $tempFile -Encoding utf8
+az rest --method PATCH --url "https://graph.microsoft.com/v1.0/applications/$($appManifest.id)" --body "@$tempFile" --headers "Content-Type=application/json" --output none
+$apiResult = $LASTEXITCODE
+Remove-Item $tempFile -ErrorAction SilentlyContinue
+if ($apiResult -ne 0) {
+    Write-Warning "Failed to update API config — configure manually (v2 tokens + preauth)."
 } else {
-    Write-Host "API scope 'access_as_user' already exists." -ForegroundColor Green
+    Write-Host "API scope configured: $apiUri/access_as_user (v2 tokens, $($preAuthorizedClients.Count) preauthorized clients)." -ForegroundColor Green
 }
 
 # ---------------------------------------------------------------------------

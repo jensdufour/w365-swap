@@ -3,16 +3,26 @@ import type { HttpRequest } from "@azure/functions";
 import { HttpError } from "./http";
 import type { AuthContext } from "./types";
 
-const tenantId = process.env.AZURE_TENANT_ID;
-const clientId = process.env.AZURE_CLIENT_ID;
+// Use MOSAIC_-prefixed env var names: the Azure SDK's DefaultAzureCredential
+// reads AZURE_TENANT_ID / AZURE_CLIENT_ID / AZURE_CLIENT_SECRET to do
+// EnvironmentCredential auth. If those are present, the Cosmos/Storage
+// clients authenticate as our SPA service principal instead of the Function
+// App managed identity, breaking RBAC. Keep these scoped to JWT validation.
+const tenantId = process.env.MOSAIC_TENANT_ID;
+const clientId = process.env.MOSAIC_API_CLIENT_ID;
 
 if (!tenantId || !clientId) {
   // Don't crash module load; functions will emit 500 if invoked.
-  console.warn("AZURE_TENANT_ID or AZURE_CLIENT_ID missing — auth will fail.");
+  console.warn("MOSAIC_TENANT_ID or MOSAIC_API_CLIENT_ID missing — auth will fail.");
 }
 
 const ISSUER = tenantId ? `https://login.microsoftonline.com/${tenantId}/v2.0` : undefined;
-const AUDIENCE = clientId ? `api://${clientId}` : undefined;
+// Accept both forms of the audience claim:
+//   - v1 tokens: "api://{clientId}" (App ID URI)
+//   - v2 tokens: "{clientId}" (bare GUID — Microsoft's v2 normalization)
+// The Entra app is configured for v2 tokens (requestedAccessTokenVersion=2)
+// but we accept v1 too for forward/backward compatibility.
+const AUDIENCE = clientId ? [clientId, `api://${clientId}`] : undefined;
 
 const jwks = tenantId
   ? createRemoteJWKSet(new URL(`https://login.microsoftonline.com/${tenantId}/discovery/v2.0/keys`))

@@ -165,9 +165,14 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
     siteConfig: {
       appSettings: [
         { name: 'AzureWebJobsStorage__accountName', value: funcStorage.name }
-        { name: 'AZURE_TENANT_ID', value: tenantId }
-        { name: 'AZURE_CLIENT_ID', value: clientId }
-        { name: 'AZURE_CLIENT_SECRET', value: '@Microsoft.KeyVault(VaultName=${keyVaultName};SecretName=azure-client-secret)' }
+        // JWT validation needs the tenant and our API's clientId. We use
+        // MOSAIC_-prefixed names instead of AZURE_TENANT_ID / AZURE_CLIENT_ID
+        // because @azure/identity's DefaultAzureCredential reads those env
+        // vars and would attempt to authenticate as the SPA's service
+        // principal (EnvironmentCredential) instead of the Function App's
+        // managed identity. The collision causes Cosmos/Storage RBAC failures.
+        { name: 'MOSAIC_TENANT_ID', value: tenantId }
+        { name: 'MOSAIC_API_CLIENT_ID', value: clientId }
         // Required for the Node v4 programming model (app.http(...) in code)
         { name: 'AzureWebJobsFeatureFlags', value: 'EnableWorkerIndexing' }
         // Mosaic v0 — state vault wiring
