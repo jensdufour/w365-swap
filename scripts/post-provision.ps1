@@ -34,20 +34,37 @@ if (-not $swaUrl) { throw "AZURE_STATIC_WEB_APP_URL not found in azd env — was
 Write-Host "`n=== W365 Swap — Post-Provision ===" -ForegroundColor Cyan
 
 # ---------------------------------------------------------------------------
-# 1. Patch SPA redirect URIs with production SWA URL
+# 1. Patch SPA redirect URIs with production SWA URL + any extras
 # ---------------------------------------------------------------------------
 
-Write-Host "Updating SPA redirect URIs with production URL..." -ForegroundColor Cyan
+Write-Host "Updating SPA redirect URIs..." -ForegroundColor Cyan
 
 $appManifest = az ad app show --id $clientId --output json | ConvertFrom-Json
-$currentUris = @($appManifest.spa.redirectUris)
+$currentUris = [System.Collections.Generic.HashSet[string]]::new(
+    [System.StringComparer]::OrdinalIgnoreCase
+)
+foreach ($u in @($appManifest.spa.redirectUris)) {
+    if ($u) { [void]$currentUris.Add($u) }
+}
 
-if ($swaUrl -notin $currentUris) {
-    $updatedUris = @($currentUris + $swaUrl) | Select-Object -Unique
+$desired = [System.Collections.Generic.List[string]]::new()
+if ($swaUrl) { [void]$desired.Add($swaUrl) }
 
+$extraUris = Get-AzdEnv 'AZURE_EXTRA_REDIRECT_URIS'
+if ($extraUris) {
+    foreach ($u in ($extraUris -split '[;,]')) {
+        $u = $u.Trim()
+        if ($u) { [void]$desired.Add($u) }
+    }
+}
+
+$missing = $desired | Where-Object { -not $currentUris.Contains($_) }
+
+if ($missing) {
+    foreach ($u in $missing) { [void]$currentUris.Add($u) }
     $spaBody = @{
         spa = @{
-            redirectUris = $updatedUris
+            redirectUris = @($currentUris)
         }
     } | ConvertTo-Json -Depth 3
 
@@ -57,12 +74,12 @@ if ($swaUrl -notin $currentUris) {
     $patchResult = $LASTEXITCODE
     Remove-Item $tempFile -ErrorAction SilentlyContinue
     if ($patchResult -eq 0) {
-        Write-Host "Added redirect URI: $swaUrl" -ForegroundColor Green
+        Write-Host "Added redirect URI(s): $($missing -join ', ')" -ForegroundColor Green
     } else {
-        Write-Warning "Failed to update redirect URI — add '$swaUrl' manually in Entra ID."
+        Write-Warning "Failed to update redirect URIs — add the following manually in Entra ID: $($missing -join ', ')"
     }
 } else {
-    Write-Host "Redirect URI already present." -ForegroundColor Green
+    Write-Host "Redirect URIs already up to date." -ForegroundColor Green
 }
 
 # ---------------------------------------------------------------------------

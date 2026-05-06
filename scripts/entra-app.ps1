@@ -109,18 +109,36 @@ if (-not $sp) {
 
 Write-Host "Configuring SPA platform..." -ForegroundColor Cyan
 
-# Always include localhost for dev; production URI added in post-provision
-$redirectUris = @('http://localhost:3000')
+$appManifest = az ad app show --id $clientId --output json | ConvertFrom-Json
 
-$existingSwaUrl = Get-AzdEnv 'AZURE_STATIC_WEB_APP_URL'
-if ($existingSwaUrl) {
-    $redirectUris += $existingSwaUrl
+# Merge strategy: keep whatever is already on the app registration, then
+# union in (a) localhost for dev, (b) the SWA URL if known, and (c) any
+# custom domains the user persisted in azd env via AZURE_EXTRA_REDIRECT_URIS
+# (semicolon-separated). This means manually-added URIs (e.g. custom domains
+# added in the Azure Portal) survive `azd up` re-runs.
+$redirectUris = [System.Collections.Generic.List[string]]::new()
+foreach ($u in @($appManifest.spa.redirectUris)) {
+    if ($u) { [void]$redirectUris.Add($u) }
 }
 
-$appManifest = az ad app show --id $clientId --output json | ConvertFrom-Json
+if ('http://localhost:3000' -notin $redirectUris) { [void]$redirectUris.Add('http://localhost:3000') }
+
+$existingSwaUrl = Get-AzdEnv 'AZURE_STATIC_WEB_APP_URL'
+if ($existingSwaUrl -and $existingSwaUrl -notin $redirectUris) {
+    [void]$redirectUris.Add($existingSwaUrl)
+}
+
+$extraUris = Get-AzdEnv 'AZURE_EXTRA_REDIRECT_URIS'
+if ($extraUris) {
+    foreach ($u in ($extraUris -split '[;,]')) {
+        $u = $u.Trim()
+        if ($u -and $u -notin $redirectUris) { [void]$redirectUris.Add($u) }
+    }
+}
+
 $spaBody = @{
     spa = @{
-        redirectUris = $redirectUris
+        redirectUris = @($redirectUris)
     }
 } | ConvertTo-Json -Depth 3
 
@@ -130,7 +148,7 @@ az rest --method PATCH --url "https://graph.microsoft.com/v1.0/applications/$($a
 $spaResult = $LASTEXITCODE
 Remove-Item $tempFile -ErrorAction SilentlyContinue
 if ($spaResult -ne 0) { Write-Warning "Failed to set SPA redirect URIs — update manually." }
-else { Write-Host "SPA redirect URIs configured." -ForegroundColor Green }
+else { Write-Host "SPA redirect URIs configured ($($redirectUris.Count))." -ForegroundColor Green }
 
 # ---------------------------------------------------------------------------
 # Expose API scope (for OBO flow)
