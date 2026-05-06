@@ -17,23 +17,17 @@ param clientId string
 @description('Entra ID app registration client secret.')
 param clientSecret string
 
-@description('Subnet ID for Function App VNet integration.')
-param integrationSubnetId string
-
-@description('Subnet ID for private endpoints.')
-param endpointsSubnetId string
-
-@description('Private DNS zone resource ID for Key Vault.')
-param kvDnsZoneId string
-
 var staticWebAppName = '${namePrefix}-portal'
 var functionAppName = '${namePrefix}-api'
 var appServicePlanName = '${namePrefix}-plan'
 var keyVaultName = '${namePrefix}-kv'
 var funcStorageName = replace('stfunc${namePrefix}', '-', '')
+var deploymentContainerName = 'app-package'
 
 // ---------------------------------------------------------------------------
-// Storage Account — dedicated for Function App runtime (no network restrictions)
+// Storage Account — dedicated for Function App runtime + Flex deployment
+// package. Public network access; data plane protected by Entra-only auth
+// (allowSharedKeyAccess: false) + RBAC.
 // ---------------------------------------------------------------------------
 
 resource funcStorage 'Microsoft.Storage/storageAccounts@2023-05-01' = {
@@ -47,22 +41,28 @@ resource funcStorage 'Microsoft.Storage/storageAccounts@2023-05-01' = {
   properties: {
     supportsHttpsTrafficOnly: true
     minimumTlsVersion: 'TLS1_2'
-    allowSharedKeyAccess: true
+    allowSharedKeyAccess: false
     networkAcls: {
-      defaultAction: 'Deny'
+      defaultAction: 'Allow'
       bypass: 'AzureServices'
-      virtualNetworkRules: [
-        {
-          id: integrationSubnetId
-          action: 'Allow'
-        }
-      ]
     }
   }
 }
 
-// Connection string not usable — CDX policy disables shared key access.
-// Use managed identity-based AzureWebJobsStorage instead.
+resource funcBlobServices 'Microsoft.Storage/storageAccounts/blobServices@2023-05-01' = {
+  parent: funcStorage
+  name: 'default'
+}
+
+// Container holding the Flex Consumption deployment package(s). The Function
+// App's system-assigned identity reads from here on cold start.
+resource appPackageContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = {
+  parent: funcBlobServices
+  name: deploymentContainerName
+  properties: {
+    publicAccess: 'None'
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Key Vault — secure secret storage (SFI: no plaintext secrets in app settings)
@@ -94,48 +94,62 @@ resource clientSecretEntry 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
 }
 
 // ---------------------------------------------------------------------------
-// Functions App — API backend with managed identity
+// Functions App — Flex Consumption (pay-per-execution, scale-to-zero)
 // ---------------------------------------------------------------------------
 
-resource appServicePlan 'Microsoft.Web/serverfarms@2023-12-01' = {
+resource appServicePlan 'Microsoft.Web/serverfarms@2024-04-01' = {
   name: appServicePlanName
   location: location
   tags: tags
-  kind: 'functionapp'
+  kind: 'functionapp,linux'
   sku: {
-    name: 'B1'
-    tier: 'Basic'
+    name: 'FC1'
+    tier: 'FlexConsumption'
+  }
+  properties: {
+    reserved: true
   }
 }
 
-resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
+resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
   name: functionAppName
   location: location
   tags: union(tags, { 'azd-service-name': 'api' })
-  kind: 'functionapp'
+  kind: 'functionapp,linux'
   identity: {
     type: 'SystemAssigned'
   }
   properties: {
     serverFarmId: appServicePlan.id
     httpsOnly: true
-    virtualNetworkSubnetId: integrationSubnetId
-    vnetRouteAllEnabled: true
+    functionAppConfig: {
+      deployment: {
+        storage: {
+          type: 'blobContainer'
+          value: '${funcStorage.properties.primaryEndpoints.blob}${deploymentContainerName}'
+          authentication: {
+            type: 'SystemAssignedIdentity'
+          }
+        }
+      }
+      runtime: {
+        name: 'node'
+        version: '20'
+      }
+      scaleAndConcurrency: {
+        maximumInstanceCount: 100
+        instanceMemoryMB: 2048
+      }
+    }
     siteConfig: {
       appSettings: [
         { name: 'AzureWebJobsStorage__accountName', value: funcStorage.name }
         { name: 'AZURE_TENANT_ID', value: tenantId }
         { name: 'AZURE_CLIENT_ID', value: clientId }
         { name: 'AZURE_CLIENT_SECRET', value: '@Microsoft.KeyVault(VaultName=${keyVaultName};SecretName=azure-client-secret)' }
-        { name: 'FUNCTIONS_EXTENSION_VERSION', value: '~4' }
-        { name: 'FUNCTIONS_WORKER_RUNTIME', value: 'node' }
-        { name: 'WEBSITE_NODE_DEFAULT_VERSION', value: '~20' }
         // Required for the Node v4 programming model (app.http(...) in code)
         { name: 'AzureWebJobsFeatureFlags', value: 'EnableWorkerIndexing' }
-        { name: 'SCM_DO_BUILD_DURING_DEPLOYMENT', value: 'true' }
-        { name: 'ENABLE_ORYX_BUILD', value: 'true' }
       ]
-      alwaysOn: true
       minTlsVersion: '1.2'
       ftpsState: 'Disabled'
       cors: {
@@ -146,6 +160,9 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
       }
     }
   }
+  dependsOn: [
+    appPackageContainer
+  ]
 }
 
 // Override EasyAuth to AllowAnonymous — SWA linked backend auto-enables EasyAuth
@@ -248,44 +265,6 @@ output staticWebAppUrl string = 'https://${staticWebApp.properties.defaultHostna
 output staticWebAppName string = staticWebApp.name
 output functionAppUrl string = 'https://${functionApp.properties.defaultHostName}'
 output functionAppName string = functionApp.name
-// ---------------------------------------------------------------------------
-// Private Endpoint — Key Vault (works when publicNetworkAccess is Disabled)
-// ---------------------------------------------------------------------------
-
-resource kvPrivateEndpoint 'Microsoft.Network/privateEndpoints@2024-01-01' = {
-  name: '${keyVaultName}-pe'
-  location: location
-  tags: tags
-  properties: {
-    subnet: {
-      id: endpointsSubnetId
-    }
-    privateLinkServiceConnections: [
-      {
-        name: '${keyVaultName}-plsc'
-        properties: {
-          privateLinkServiceId: keyVault.id
-          groupIds: ['vault']
-        }
-      }
-    ]
-  }
-}
-
-resource kvDnsZoneGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-01-01' = {
-  parent: kvPrivateEndpoint
-  name: 'default'
-  properties: {
-    privateDnsZoneConfigs: [
-      {
-        name: 'privatelink-vaultcore'
-        properties: {
-          privateDnsZoneId: kvDnsZoneId
-        }
-      }
-    ]
-  }
-}
 
 output keyVaultName string = keyVault.name
 output functionAppResourceId string = functionApp.id

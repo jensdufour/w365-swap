@@ -42,21 +42,7 @@ resource rg 'Microsoft.Resources/resourceGroups@2024-03-01' = {
 }
 
 // ---------------------------------------------------------------------------
-// Networking — VNet with integration & private endpoint subnets
-// ---------------------------------------------------------------------------
-
-module networking 'modules/networking.bicep' = {
-  name: 'networking'
-  scope: rg
-  params: {
-    namePrefix: namePrefix
-    location: location
-    tags: rg.tags
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Portal — Key Vault, Functions App, Static Web App
+// Portal — Key Vault, Functions App (Flex Consumption), Static Web App
 // ---------------------------------------------------------------------------
 
 module portal 'modules/portal.bicep' = {
@@ -69,9 +55,6 @@ module portal 'modules/portal.bicep' = {
     tenantId: tenantId
     clientId: clientId
     clientSecret: clientSecret
-    integrationSubnetId: networking.outputs.integrationSubnetId
-    endpointsSubnetId: networking.outputs.endpointsSubnetId
-    kvDnsZoneId: networking.outputs.kvDnsZoneId
   }
 }
 
