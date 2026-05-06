@@ -3,6 +3,7 @@
 import { useIsAuthenticated, useMsal } from "@azure/msal-react";
 import { InteractionStatus } from "@azure/msal-browser";
 import { apiScopes } from "@/lib/msal-config";
+import { MosaicDashboard } from "@/components/MosaicDashboard";
 
 export default function Home() {
   const { instance, inProgress } = useMsal();
@@ -69,17 +70,8 @@ export default function Home() {
         </div>
       </header>
 
-      <main className="max-w-3xl mx-auto px-6 py-16 text-center">
-        <h2 className="text-2xl font-semibold text-gray-900">No states yet</h2>
-        <p className="mt-3 text-gray-600">
-          Mosaic captures and restores your Windows 365 user state — files, settings,
-          dev tooling — across sessions and SKUs. The agent and catalog API for v0
-          are still being built; this portal is a placeholder.
-        </p>
-        <p className="mt-6 text-sm text-gray-500">
-          Once the agent ships, install it on your Cloud PC and your saved states
-          will appear here.
-        </p>
+      <main className="bg-gray-50 min-h-[calc(100vh-57px)]">
+        <MosaicDashboard />
       </main>
     </div>
   );
