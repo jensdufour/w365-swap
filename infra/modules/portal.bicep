@@ -17,6 +17,21 @@ param clientId string
 @description('Entra ID app registration client secret.')
 param clientSecret string
 
+@description('Cosmos DB account name (created by cosmos module).')
+param cosmosAccountName string
+
+@description('Cosmos DB SQL database name.')
+param cosmosDatabaseName string
+
+@description('Cosmos DB document endpoint.')
+param cosmosEndpoint string
+
+@description('States storage account name (created by storage-states module).')
+param statesStorageAccountName string
+
+@description('States storage container name.')
+param statesContainerName string
+
 // Deterministic per-deployment suffix so globally-unique names (KV, Function
 // App, Storage) don't collide with other Azure tenants/subscriptions that may
 // have squatted the same prefix. Stable per resource group, so re-deploys
@@ -155,6 +170,12 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
         { name: 'AZURE_CLIENT_SECRET', value: '@Microsoft.KeyVault(VaultName=${keyVaultName};SecretName=azure-client-secret)' }
         // Required for the Node v4 programming model (app.http(...) in code)
         { name: 'AzureWebJobsFeatureFlags', value: 'EnableWorkerIndexing' }
+        // Mosaic v0 — state vault wiring
+        { name: 'COSMOS_ACCOUNT_NAME', value: cosmosAccountName }
+        { name: 'COSMOS_DATABASE_NAME', value: cosmosDatabaseName }
+        { name: 'COSMOS_ENDPOINT', value: cosmosEndpoint }
+        { name: 'STATES_STORAGE_ACCOUNT_NAME', value: statesStorageAccountName }
+        { name: 'STATES_CONTAINER_NAME', value: statesContainerName }
       ]
       minTlsVersion: '1.2'
       ftpsState: 'Disabled'
@@ -274,3 +295,4 @@ output functionAppName string = functionApp.name
 
 output keyVaultName string = keyVault.name
 output functionAppResourceId string = functionApp.id
+output functionAppPrincipalId string = functionApp.identity.principalId
